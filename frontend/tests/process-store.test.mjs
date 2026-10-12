@@ -75,6 +75,7 @@ function mockServer() {
       return response(result)
     }
     if (path === '/api/diagrams' && method === 'POST') {
+      if (server.failNextWrite) { server.failNextWrite = false; return response({ detail: '模拟保存失败' }, 500) }
       const id = `created-${++sequence}`
       const result = { ...clone(body), id, revision: `${id}:0`, nodeCount: body.nodes.length, edgeCount: body.edges.length, updatedAt: '2026-10-12T00:01:00Z' }
       diagrams.set(id, result)
@@ -152,6 +153,84 @@ test('迟到打开响应不能覆盖最新文档；关闭会取消等待中的�
   assert.equal(store.getState().loading, false)
 })
 
+test('新详情确认的名称和 revision 不会被迟到的旧目录回滚', async () => {
+  const server = mockServer()
+  const store = createProcessStore()
+  await store.getState().loadList()
+  const wait = deferred()
+  server.beforeList = () => wait.promise
+  const oldList = store.getState().loadList()
+  server.mutate('A', (value) => { value.name = '其他窗口的新名称' })
+  await store.getState().open('A')
+  const latest = clone(store.getState().current)
+  wait.resolve()
+  await oldList
+  const listed = store.getState().diagrams.find((item) => item.id === 'A')
+  assert.equal(listed.name, latest.name)
+  assert.equal(listed.revision, latest.revision)
+  assert.equal(store.getState().loading, false)
+})
+
+test('后台文档重命名或删除不取消另一文档的待完成打开', async () => {
+  for (const operation of ['rename', 'remove']) {
+    const server = mockServer()
+    const store = createProcessStore()
+    await store.getState().loadList()
+    const wait = deferred()
+    server.beforeGet = (id) => id === 'A' ? wait.promise : undefined
+    const opening = store.getState().open('A')
+    if (operation === 'rename') await store.getState().rename('B', '后台新名称', '')
+    else await store.getState().remove('B')
+    assert.equal(store.getState().loading, true)
+    wait.resolve()
+    await opening
+    assert.equal(store.getState().current.id, 'A')
+    assert.equal(store.getState().loading, false)
+    assert.equal(store.getState().error, null)
+  }
+})
+
+test('正在打开的同一文档重命名后采用保存响应，旧详情不回滚它', async () => {
+  const server = mockServer()
+  const store = createProcessStore()
+  await store.getState().loadList()
+  const wait = deferred()
+  let requests = 0
+  server.beforeGet = () => ++requests === 1 ? wait.promise : undefined
+  const opening = store.getState().open('A')
+  await store.getState().rename('A', '已重命名的流程', '已更新说明')
+  assert.equal(store.getState().current.name, '已重命名的流程')
+  assert.equal(store.getState().loading, false)
+  wait.resolve()
+  await opening
+  assert.equal(store.getState().current.name, '已重命名的流程')
+  assert.equal(store.getState().current.revision, server.snapshot('A').revision)
+})
+
+test('新建与删除同一文档会取消旧打开，失败的删除仍允许打开完成', async () => {
+  for (const operation of ['create', 'remove', 'failed-remove']) {
+    const server = mockServer()
+    const store = createProcessStore()
+    await store.getState().loadList()
+    const wait = deferred()
+    server.beforeGet = () => wait.promise
+    const opening = store.getState().open('A')
+    let created
+    if (operation === 'create') created = await store.getState().create(emptyProcess('新流程'))
+    else if (operation === 'remove') await store.getState().remove('A')
+    else {
+      server.failNextWrite = true
+      await assert.rejects(store.getState().remove('A'), /模拟保存失败/)
+      assert.equal(store.getState().loading, true)
+    }
+    wait.resolve()
+    await opening
+    assert.equal(store.getState().current?.id ?? null, operation === 'create' ? created.id : operation === 'remove' ? null : 'A')
+    assert.equal(store.getState().loading, false)
+    if (operation === 'remove') assert.ok(!store.getState().diagrams.some((item) => item.id === 'A'))
+  }
+})
+
 test('保存队列基于最近成功内容构建，写入期间不能切图或关闭', async () => {
   const server = mockServer()
   const gate = deferred()
@@ -203,6 +282,70 @@ test('失败及 CAS 冲突保留已保存内容与历史，后续操作仍可执
   assert.equal(store.getState().past.length, 0)
 })
 
+test('无操作撤销重做、无变化编辑和后台重命名不会消除当前文档冲突', async () => {
+  const server = mockServer()
+  const store = createProcessStore()
+  await store.getState().loadList()
+  await store.getState().open('A')
+  server.mutate('A', (value) => { value.nodes[0].name = '其他页面修改' })
+  await assert.rejects(store.getState().edit((draft) => { draft.nodes[0].name = '本页修改' }))
+  const conflict = store.getState().error
+  assert.ok(conflict)
+  assert.equal(await store.getState().undo(), false)
+  assert.equal(await store.getState().redo(), false)
+  assert.equal(await store.getState().edit(() => {}), false)
+  await store.getState().rename('B', '另一文档的新名', '')
+  assert.equal(store.getState().error, conflict)
+  assert.equal(store.getState().current.nodes[0].name, 'A-1')
+  await store.getState().open('A')
+  assert.equal(store.getState().error, null)
+})
+
+test('服务端规范化后的文档名称用于显示和后续保存', async () => {
+  const server = mockServer()
+  const fetch = globalThis.fetch
+  globalThis.fetch = (url, init = {}) => {
+    if (init.method === 'POST') {
+      const body = JSON.parse(init.body)
+      return fetch(url, { ...init, body: JSON.stringify({ ...body, name: body.name.trim() }) })
+    }
+    return fetch(url, init)
+  }
+  const store = createProcessStore()
+  const created = await store.getState().create(emptyProcess('  规范名称  '))
+  assert.equal(created.name, '规范名称')
+  assert.equal(store.getState().current.name, '规范名称')
+  await store.getState().edit((draft) => { draft.nodes.push(node('new-step')) })
+  assert.equal(server.writes().at(-1).body.name, '规范名称')
+})
+
+test('后台文档写入与创建失败不替换当前文档的正常或冲突状态', async () => {
+  for (const conflict of [false, true]) {
+    const server = mockServer()
+    const store = createProcessStore()
+    await store.getState().loadList()
+    await store.getState().open('A')
+    if (conflict) {
+      server.mutate('A', (value) => { value.nodes[0].name = '另一页面内容' })
+      await assert.rejects(store.getState().edit((draft) => { draft.nodes[0].name = '旧页面修改' }))
+    }
+    const originalError = store.getState().error
+    for (const operation of [
+      () => store.getState().rename('B', '失败的后台重命名', ''),
+      () => store.getState().remove('B'),
+      () => store.getState().create(emptyProcess('失败的新流程')),
+    ]) {
+      server.failNextWrite = true
+      await assert.rejects(operation(), /模拟保存失败/)
+      assert.equal(store.getState().current.id, 'A')
+      assert.equal(store.getState().error, originalError)
+      assert.equal(store.getState().busy, false)
+    }
+    assert.equal(store.getState().diagrams.length, 2)
+    assert.equal(store.getState().current.nodes[0].name, 'A-1')
+  }
+})
+
 test('重命名后的撤销和重做只改变内容，保留名称与说明', async () => {
   const server = mockServer()
   const store = createProcessStore()
@@ -220,6 +363,47 @@ test('重命名后的撤销和重做只改变内容，保留名称与说明', as
   assert.equal(server.snapshot('A').name, '新流程名')
   assert.equal(server.snapshot('A').nodes[0].name, '修改后环节')
   assert.equal(server.snapshot('B').name, '另一流程新名')
+})
+
+test('信息表单和删除确认使用观察到的 revision，目录或当前文档刷新不能绕过 CAS', async () => {
+  for (const active of [false, true]) {
+    for (const operation of ['rename', 'remove']) {
+      const server = mockServer()
+      const store = createProcessStore()
+      await store.getState().loadList()
+      await store.getState().open(active ? 'B' : 'A')
+      // 模拟表单或删除确认已打开，此后另一页面更新且本页目录完成刷新。
+      const observedRevision = store.getState().diagrams.find((item) => item.id === 'B').revision
+      server.mutate('B', (value) => {
+        value.name = '另一页面的新名称'
+        value.description = '另一页面的新说明'
+        value.nodes[0].name = '另一页面的新步骤'
+      })
+      await store.getState().loadList()
+      if (active) await store.getState().open('B')
+      const external = server.snapshot('B')
+      const submit = () => operation === 'rename'
+        ? store.getState().rename('B', '旧表单的名称', '旧表单的说明', observedRevision)
+        : store.getState().remove('B', observedRevision)
+      await assert.rejects(submit(), (error) => error.status === 409)
+      assert.deepEqual(server.snapshot('B'), external)
+      assert.equal(store.getState().diagrams.find((item) => item.id === 'B').revision, external.revision)
+      assert.equal(store.getState().current.id, active ? 'B' : 'A')
+      if (active) assert.equal(store.getState().current.nodes[0].name, '另一页面的新步骤')
+
+      // 用户重新观察最新版本后，使用匹配版本的相同操作可以正常完成。
+      if (operation === 'rename') {
+        await store.getState().rename('B', '确认后的新名称', '确认后的新说明', external.revision)
+        assert.equal(server.snapshot('B').name, '确认后的新名称')
+        assert.equal(server.snapshot('B').description, '确认后的新说明')
+        assert.equal(server.snapshot('B').nodes[0].name, '另一页面的新步骤')
+      } else {
+        await store.getState().remove('B', external.revision)
+        assert.deepEqual(server.all(), ['A'])
+        assert.equal(store.getState().current?.id ?? null, active ? null : 'A')
+      }
+    }
+  }
 })
 
 test('删除流程只影响指定文档，失败时目录、选择与历史保持原样', async () => {

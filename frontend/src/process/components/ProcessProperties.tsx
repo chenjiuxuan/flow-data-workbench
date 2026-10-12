@@ -1,16 +1,10 @@
 import { Alert, Button, Input, Select, Tag, Tooltip } from 'antd'
 import { CloseOutlined, DeleteOutlined, LinkOutlined, ReloadOutlined } from '@ant-design/icons'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NODE_TYPE_META } from '../../components/meta'
 import { PROCESS_NODE_META } from '../meta'
 import { useProcessStore } from '../store'
-import type { ProcessNode } from '../types'
-
-type NodeForm = Pick<ProcessNode, 'name' | 'owner' | 'description' | 'input' | 'output' | 'assetIds'>
-const nodeForm = (node: ProcessNode): NodeForm => ({
-  name: node.name, owner: node.owner, description: node.description,
-  input: node.input, output: node.output, assetIds: node.assetIds,
-})
+import { nodeForm, normalizeNodeForm, reconcileDrafts, type NodeForm, type PropertyDraft } from '../formState'
 
 interface Props {
   assetLoading: boolean
@@ -27,8 +21,12 @@ export function ProcessProperties({ assetLoading, assetError, onRetryAssets, onO
   const assets = useProcessStore((state) => state.assets)
   const busy = useProcessStore((state) => state.busy || state.loading)
   // 切换选中项时保留当前文档中的未保存草稿；已保存值变化（包括撤销）后以服务端值为准。
-  const [nodeDrafts, setNodeDrafts] = useState<Record<string, { baseline: string; value: NodeForm }>>({})
-  const [edgeDrafts, setEdgeDrafts] = useState<Record<string, { baseline: string; value: string }>>({})
+  const [nodeDrafts, setNodeDrafts] = useState<Record<string, PropertyDraft<NodeForm>>>({})
+  const [edgeDrafts, setEdgeDrafts] = useState<Record<string, PropertyDraft<string>>>({})
+  useEffect(() => {
+    setNodeDrafts((previous) => reconcileDrafts(previous, new Map((current?.nodes ?? []).map((item) => [item.id, JSON.stringify(nodeForm(item))]))))
+    setEdgeDrafts((previous) => reconcileDrafts(previous, new Map((current?.edges ?? []).map((item) => [item.id, item.label]))))
+  }, [current?.nodes, current?.edges])
   const node = selection?.kind === 'node' ? current?.nodes.find((item) => item.id === selection.id) : undefined
   const edge = selection?.kind === 'edge' ? current?.edges.find((item) => item.id === selection.id) : undefined
   if (!node && !edge) return null
@@ -45,15 +43,31 @@ export function ProcessProperties({ assetLoading, assetError, onRetryAssets, onO
     if (busy || !dirty) return false
     if (node && draft) {
       if (!draft.name.trim()) return false
-      return onSave(() => useProcessStore.getState().edit((content) => {
+      const desired = normalizeNodeForm(draft)
+      // 归一化后已与保存值一致也是成功，不能让“查看资产”把无变化当成保存失败。
+      const saved = JSON.stringify(desired) === baseline || await onSave(() => useProcessStore.getState().edit((content) => {
         const target = content.nodes.find((item) => item.id === node.id)
-        if (target) Object.assign(target, { ...draft, name: draft.name.trim() })
+        if (target) Object.assign(target, desired)
       }), '属性已保存')
+      if (saved) setNodeDrafts((previous) => {
+        const next = { ...previous }
+        delete next[node.id]
+        return next
+      })
+      return saved
     }
-    if (edge) return onSave(() => useProcessStore.getState().edit((content) => {
-      const target = content.edges.find((item) => item.id === edge.id)
-      if (target) target.label = edgeLabel
-    }), '连线条件已保存')
+    if (edge) {
+      const saved = await onSave(() => useProcessStore.getState().edit((content) => {
+        const target = content.edges.find((item) => item.id === edge.id)
+        if (target) target.label = edgeLabel
+      }), '连线条件已保存')
+      if (saved) setEdgeDrafts((previous) => {
+        const next = { ...previous }
+        delete next[edge.id]
+        return next
+      })
+      return saved
+    }
     return false
   }
 

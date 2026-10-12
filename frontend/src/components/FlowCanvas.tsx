@@ -2,7 +2,7 @@
 import {
   Background, Controls, MiniMap, ReactFlow, useReactFlow,
   SelectionMode,
-  applyNodeChanges, applyEdgeChanges,
+  applyEdgeChanges,
   type Connection, type Edge as RfEdge, type NodeChange, type EdgeChange,
 } from '@xyflow/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -11,6 +11,7 @@ import { useStore } from '../store'
 import type { GraphNode } from '../types'
 import { DataNode, type DataFlowNodeType } from './DataNode'
 import { EDGE_TYPE_LABEL } from './meta'
+import { applyEditableNodeChanges, finalNodePositions } from '../utils/nodePositions'
 
 const nodeTypes = { dataNode: DataNode }
 
@@ -93,8 +94,20 @@ export function FlowCanvas() {
   }, [displayEdges, canvasSelection])
 
   const onNodesChange = useCallback((changes: NodeChange<DataFlowNodeType>[]) => {
-    setRfNodes((current) => applyNodeChanges(changes, current))
-  }, [])
+    const state = useStore.getState()
+    setRfNodes((current) => applyEditableNodeChanges(changes, current, state.busy))
+    if (state.busy) return
+    const positions = finalNodePositions(changes)
+    if (!positions.size) return
+    // 鼠标拖动、多选移动和方向键均由最终坐标批次触发一次原子保存。
+    void state.saveLayout(Object.fromEntries(positions)).catch((error) => {
+      message.error(`位置保存失败：${(error as Error).message}`)
+      setRfNodes((previous) => previous.map((node) => {
+        const actual = useStore.getState().nodes.find((item) => item.id === node.id)
+        return actual && positions.has(node.id) ? { ...node, position: { x: actual.x, y: actual.y }, dragging: false } : node
+      }))
+    })
+  }, [message])
   const onEdgesChange = useCallback((changes: EdgeChange<RfEdge>[]) => {
     setRfEdges((current) => applyEdgeChanges(changes, current))
   }, [])
@@ -128,20 +141,6 @@ export function FlowCanvas() {
         message.success('已建立数据流')
       } catch (e) {
         message.error(`连线失败：${(e as Error).message}`)
-      }
-    },
-    [message],
-  )
-
-  // React Flow 传入实际拖动的一组节点，不要求节点事先被选中。
-  const onNodeDragStop = useCallback(
-    async (_event: React.MouseEvent, node: DataFlowNodeType, dragged: DataFlowNodeType[]) => {
-      const moved = dragged.length ? dragged : [node]
-      try {
-        await useStore.getState().saveLayout(Object.fromEntries(moved.map((n) => [n.id, n.position])))
-      } catch (error) {
-        message.error(`位置保存失败：${(error as Error).message}`)
-        await useStore.getState().refresh().catch(() => undefined)
       }
     },
     [message],
@@ -226,7 +225,6 @@ export function FlowCanvas() {
         onEdgeClick={(_, edge) => select({ kind: 'edge', id: edge.id })}
         onPaneClick={() => select(null)}
         onConnect={onConnect}
-        onNodeDragStop={onNodeDragStop}
         onBeforeDelete={async ({ nodes: deletedNodes, edges: deletedEdges }) => {
           if (busy) return false
           try {

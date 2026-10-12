@@ -29,18 +29,21 @@ export function autoLayout({ nodeIds, edges }: LayoutInput): Record<string, { x:
   })
   g.setDefaultEdgeLabel(() => ({}))
 
-  for (const id of nodeIds) g.setNode(id, { width: DEFAULT_NODE_W, height: DEFAULT_NODE_H })
+  // 外部 ID 可含 __proto__/constructor；不要把它们交给 graphlib 的对象键表。
+  const keys = new Map(nodeIds.map((id, index) => [id, `node:${index}`]))
+  for (const key of keys.values()) g.setNode(key, { width: DEFAULT_NODE_W, height: DEFAULT_NODE_H })
   for (const e of edges) {
-    if (!g.hasNode(e.source) || !g.hasNode(e.target)) continue
+    const source = keys.get(e.source), target = keys.get(e.target)
+    if (!source || !target) continue
     // flow/lineage 是主数据流方向，加权让 dagre 把它们排在 rank 上
     const weight = (e.type === 'flow' || e.type === 'lineage') ? 2 : 1
-    g.setEdge(e.source, e.target, { weight })
+    g.setEdge(source, target, { weight })
   }
   dagre.layout(g)
 
-  const positions: Record<string, { x: number; y: number }> = {}
-  for (const id of nodeIds) {
-    const node = g.node(id)
+  const positions: Record<string, { x: number; y: number }> = Object.create(null)
+  for (const [id, key] of keys) {
+    const node = g.node(key)
     if (node) positions[id] = { x: node.x - DEFAULT_NODE_W / 2, y: node.y - DEFAULT_NODE_H / 2 }
   }
   return positions

@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.api import router as data_router
 from app.db import Base, get_session
-from app.models import EdgeRecord, NodeRecord, ProcessDiagramRecord
+from app.models import EdgeRecord, NodeRecord, ProcessAssetGrantRecord, ProcessDiagramRecord
 from app.process_api import router as process_router
 
 
@@ -222,12 +222,97 @@ def test_lost_asset_reference_remains_editable_but_cannot_be_newly_linked(proces
     assert client.post("/api/diagrams", json=draft(nodes=[node(assetIds=["asset"])] )).status_code == 422
     removed = save(client, edited, nodes=[node()]).json()
     assert client.get("/api/assets/asset/diagrams").json() == []
-    assert save(client, removed, nodes=[node(assetIds=["asset"])]).status_code == 422
-    assert client.get(f"/api/diagrams/{original['id']}").json() == removed
+    restored = save(client, removed, nodes=[node(assetIds=["asset"])])
+    assert restored.status_code == 200, restored.text
+    assert client.get(f"/api/diagrams/{original['id']}").json() == restored.json()
+
+
+@pytest.mark.parametrize("invalidation", ["delete", "vanish"])
+@pytest.mark.parametrize("operation", ["delete_step", "unlink_asset"])
+def test_undo_restores_previously_authorized_unavailable_reference(process_env, invalidation, operation):
+    client, sessions = process_env
+    add_asset(client)
+    original = create(client, draft(nodes=[node(assetIds=["asset"], owner="原负责人")]))
+    if invalidation == "delete":
+        assert client.delete("/api/nodes/asset").status_code == 200
+    else:
+        with sessions() as session:
+            session.get(NodeRecord, "asset").vanished = True
+            session.commit()
+    desired = [] if operation == "delete_step" else [node(owner="原负责人")]
+    changed = save(client, original, nodes=desired)
+    assert changed.status_code == 200, changed.text
+    undone = save(client, changed.json(), nodes=original["nodes"])
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["nodes"] == original["nodes"]
+    # 多次撤销/重做不消耗恢复资格；授权不能借给同名步骤或另一张流程。
+    redone = save(client, undone.json(), nodes=desired)
+    assert redone.status_code == 200, redone.text
+    assert save(client, redone.json(), nodes=original["nodes"]).status_code == 200
+    current = client.get(f"/api/diagrams/{original['id']}").json()
+    assert save(client, current, nodes=[node("another", assetIds=["asset"])]).status_code == 422
+    assert client.post("/api/diagrams", json=draft(nodes=original["nodes"])).status_code == 422
+
+
+@pytest.mark.parametrize("operation", ["delete_step", "unlink_asset"])
+def test_legacy_document_without_grants_backfills_before_first_removal(process_env, operation):
+    client, sessions = process_env
+    add_asset(client)
+    original = create(client, draft(nodes=[node(assetIds=["asset"])]))
+    with sessions() as session:
+        # 升级前文档已有引用，但新授权表内没有任何记录。
+        session.query(ProcessAssetGrantRecord).delete()
+        session.commit()
+    assert client.delete("/api/nodes/asset").status_code == 200
+    desired = [] if operation == "delete_step" else [node()]
+    changed = save(client, original, nodes=desired)
+    assert changed.status_code == 200, changed.text
+    restored = save(client, changed.json(), nodes=original["nodes"])
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["nodes"] == original["nodes"]
+
+
+def test_failed_updates_rollback_legacy_backfill_and_new_grants(process_env):
+    client, sessions = process_env
+    add_asset(client)
+    add_asset(client, "new_asset")
+    original = create(client, draft(nodes=[node(assetIds=["asset"])]))
+    with sessions() as session:
+        session.query(ProcessAssetGrantRecord).delete()
+        session.commit()
+    invalid_nodes = [node(assetIds=["asset", "new_asset", "missing"])]
+    assert save(client, original, nodes=invalid_nodes).status_code == 422
+    assert client.put(f"/api/diagrams/{original['id']}", json={
+        **draft(nodes=[node(assetIds=["asset", "new_asset"])]),
+        "expected_revision": "stale"}).status_code == 409
+    with sessions() as session:
+        assert session.query(ProcessAssetGrantRecord).count() == 0
+    assert client.get(f"/api/diagrams/{original['id']}").json() == original
+    successful = save(client, original, nodes=[node(assetIds=["asset", "new_asset"])])
+    assert successful.status_code == 200, successful.text
+    with sessions() as session:
+        assert {record.asset_id for record in session.query(ProcessAssetGrantRecord)} == {"asset", "new_asset"}
+
+
+def test_create_all_adds_grants_without_altering_existing_process_documents(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy_process.db'}")
+    ProcessDiagramRecord.__table__.create(engine)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    with sessions() as session:
+        session.add(ProcessDiagramRecord(id="legacy", name="原流程", content=json.dumps({
+            "nodes": [node(assetIds=["old_asset"])], "edges": []}), revision="old_revision"))
+        session.commit()
+    Base.metadata.create_all(engine)
+    with sessions() as session:
+        legacy = session.get(ProcessDiagramRecord, "legacy")
+        assert legacy.name == "原流程" and legacy.revision == "old_revision"
+        assert json.loads(legacy.content)["nodes"][0]["assetIds"] == ["old_asset"]
+        assert session.query(ProcessAssetGrantRecord).count() == 0
+    engine.dispose()
 
 
 def test_reverse_usage_multiple_diagrams_and_delete_preserves_assets(process_env):
-    client, _ = process_env
+    client, sessions = process_env
     add_asset(client, "asset")
     first = create(client, draft(nodes=[node("a", assetIds=["asset"]), node("b", assetIds=["asset"])]))
     second = create(client, draft(name="第二条流程", nodes=[node(assetIds=["asset"])]))
@@ -237,9 +322,14 @@ def test_reverse_usage_multiple_diagrams_and_delete_preserves_assets(process_env
     before = client.get("/api/export/json").json()
     assert client.delete(f"/api/diagrams/{first['id']}").status_code == 422
     assert client.delete(f"/api/diagrams/{first['id']}", params={"expected_revision": "stale"}).status_code == 409
+    with sessions() as session:
+        assert session.query(ProcessAssetGrantRecord).filter_by(diagram_id=first["id"]).count() == 2
     assert client.get(f"/api/diagrams/{first['id']}").json() == first
     assert client.delete(f"/api/diagrams/{first['id']}", params={"expected_revision": first["revision"]}).json() == {"ok": True}
     assert client.get(f"/api/diagrams/{first['id']}").status_code == 404
+    with sessions() as session:
+        assert session.query(ProcessAssetGrantRecord).filter_by(diagram_id=first["id"]).count() == 0
+        assert session.query(ProcessAssetGrantRecord).filter_by(diagram_id=second["id"]).count() == 1
     assert client.get("/api/export/json").json() == before
     assert client.get("/api/assets/asset/diagrams").json() == [{
         "id": second["id"], "name": second["name"], "nodeIds": ["step"]}]

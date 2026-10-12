@@ -122,3 +122,17 @@ class ProcessDiagramRecord(Base):
     content: Mapped[str] = mapped_column(Text, default='{"nodes":[],"edges":[]}')
     revision: Mapped[str] = mapped_column(String(64), default=lambda: uuid4().hex)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_now, onupdate=_now)
+
+
+class ProcessAssetGrantRecord(Base):
+    """文档中已合法保存过的步骤资产引用，供撤销恢复失效引用。
+
+    独立建表使旧数据库可通过 create_all 升级；授权仅作用于同一文档、
+    同一步骤，不会允许新文档或其他步骤新增失效资产。
+    """
+
+    __tablename__ = "process_asset_grants"
+
+    diagram_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    asset_id: Mapped[str] = mapped_column(String(220), primary_key=True)

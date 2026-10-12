@@ -20,8 +20,8 @@ export interface ProcessStore {
   open: (id: string) => Promise<void>
   close: () => void
   create: (data: ProcessCreate) => Promise<ProcessDiagram>
-  rename: (id: string, name: string, description: string) => Promise<void>
-  remove: (id: string) => Promise<void>
+  rename: (id: string, name: string, description: string, expectedRevision?: string) => Promise<void>
+  remove: (id: string, expectedRevision?: string) => Promise<void>
   loadAssets: () => Promise<void>
   edit: (mutator: (draft: ProcessContent) => void) => Promise<boolean>
   undo: () => Promise<boolean>
@@ -40,6 +40,7 @@ export function createProcessStore() {
   let assetRequest = 0
   let listLoading = false
   let documentLoading = false
+  let openingId: string | null = null
   let pending = 0
   let queue: Promise<unknown> = Promise.resolve()
   const histories = new Map<string, History>()
@@ -54,6 +55,12 @@ export function createProcessStore() {
       listLoading = false
       updateLoading()
     }
+    const cancelOpen = () => {
+      openRequest += 1
+      openingId = null
+      documentLoading = false
+      updateLoading()
+    }
     const keepSelection = (diagram: ProcessDiagram) => {
       const selection = get().selection
       return selection && (selection.kind === 'node' ? diagram.nodes : diagram.edges).some((item) => item.id === selection.id)
@@ -64,16 +71,18 @@ export function createProcessStore() {
       putSummary(diagram)
       set({ current: diagram, past, future, selection: keepSelection(diagram), error: null })
     }
-    const enqueue = <T,>(operation: () => Promise<T>): Promise<T> => {
+    const enqueue = <T,>(operation: () => Promise<T>, replacesCurrent = false, documentId: string | null = null): Promise<T> => {
       pending += 1
-      // 写入期间不能让此前发出的查询替换当前文档或目录。
-      openRequest += 1
-      listRequest += 1
-      listLoading = false
-      documentLoading = false
-      set({ busy: true, loading: false, error: null })
+      // 内容写入与新建会替换当前文档；后台文档的修改不取消正在打开的其他文档。
+      if (replacesCurrent) cancelOpen()
+      invalidateList()
+      // 无变化操作没有修复先前的保存冲突；只在权威内容成功发布时清除错误。
+      set({ busy: true })
       const result = queue.then(operation).catch((error: unknown) => {
-        set({ error: errorMessage(error) })
+        // 后台文档或创建框的失败由调用方提示，不把当前文档误标为保存失败。
+        if (documentId && (get().current?.id === documentId || openingId === documentId)) {
+          set({ error: errorMessage(error) })
+        }
         throw error
       })
       queue = result.catch(() => undefined)
@@ -102,7 +111,7 @@ export function createProcessStore() {
           direction === 'undo' ? [...state.future, before].slice(-100) : state.future.slice(0, -1),
         )
         return true
-      })
+      }, true, id)
     }
 
     return {
@@ -124,6 +133,7 @@ export function createProcessStore() {
       open: async (id) => {
         if (get().busy) return
         const request = ++openRequest
+        openingId = id
         documentLoading = true
         set({ error: null })
         updateLoading()
@@ -132,18 +142,19 @@ export function createProcessStore() {
           if (request !== openRequest) return
           const savedHistory = histories.get(id)
           const history = savedHistory?.revision === diagram.revision ? savedHistory : { past: [], future: [] }
+          // 详情已确认更新的名称与版本，旧目录响应不能再把它回滚。
+          invalidateList()
           set({ selection: null, fitVersion: get().fitVersion + 1 })
           publish(diagram, history.past, history.future)
         } catch (error) {
           if (request === openRequest) { set({ error: errorMessage(error) }); throw error }
         } finally {
-          if (request === openRequest) { documentLoading = false; updateLoading() }
+          if (request === openRequest) { openingId = null; documentLoading = false; updateLoading() }
         }
       },
       close: () => {
         if (get().busy) return
-        openRequest += 1
-        documentLoading = false
+        cancelOpen()
         set({ current: null, selection: null, past: [], future: [], error: null })
         updateLoading()
       },
@@ -153,31 +164,42 @@ export function createProcessStore() {
         set({ selection: null, fitVersion: get().fitVersion + 1 })
         publish(diagram, [], [])
         return diagram
-      }),
-      rename: (id, name, description) => enqueue(async () => {
+      }, true),
+      rename: (id, name, description, expectedRevision) => enqueue(async () => {
         const state = get()
         const diagram = state.current?.id === id ? state.current : await processApi.get(id)
-        const revision = state.current?.id === id ? diagram.revision
-          : state.diagrams.find((item) => item.id === id)?.revision ?? diagram.revision
+        // 表单打开时看到的版本优先，后台刷新不能替用户批准较新的内容。
+        const revision = expectedRevision ?? (state.current?.id === id ? diagram.revision
+          : state.diagrams.find((item) => item.id === id)?.revision ?? diagram.revision)
         const saved = await processApi.update(id, { ...content(diagram), name, description, expected_revision: revision })
         invalidateList()
-        if (get().current?.id === id) publish(saved, get().past, get().future)
+        const openingThis = openingId === id
+        if (openingThis) {
+          // 重命名的保存响应比此前的 GET 更新，直接完成同一文档的打开。
+          cancelOpen()
+          set({ selection: null, fitVersion: get().fitVersion + 1 })
+        }
+        const history = histories.get(id)
+        if (get().current?.id === id || openingThis) {
+          const matching = history?.revision === diagram.revision ? history : { past: [], future: [] }
+          publish(saved, matching.past, matching.future)
+        }
         else {
           putSummary(saved)
-          const history = histories.get(id)
           if (history?.revision === diagram.revision) histories.set(id, { ...history, revision: saved.revision })
         }
-      }),
-      remove: (id) => enqueue(async () => {
+      }, false, id),
+      remove: (id, expectedRevision) => enqueue(async () => {
         const state = get()
-        const revision = state.current?.id === id ? state.current.revision
-          : state.diagrams.find((item) => item.id === id)?.revision ?? (await processApi.get(id)).revision
+        const revision = expectedRevision ?? (state.current?.id === id ? state.current.revision
+          : state.diagrams.find((item) => item.id === id)?.revision ?? (await processApi.get(id)).revision)
         await processApi.remove(id, revision)
+        if (openingId === id) cancelOpen()
         invalidateList()
         histories.delete(id)
         set({ diagrams: get().diagrams.filter((item) => item.id !== id) })
         if (get().current?.id === id) set({ current: null, selection: null, past: [], future: [] })
-      }),
+      }, false, id),
       loadAssets: async () => {
         const request = ++assetRequest
         try {
@@ -202,7 +224,7 @@ export function createProcessStore() {
           invalidateList()
           publish(saved, [...state.past, before].slice(-100), [])
           return true
-        })
+        }, true, id)
       },
       undo: () => travel('undo'),
       redo: () => travel('redo'),

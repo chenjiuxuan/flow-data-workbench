@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .api import _node_out
 from .db import get_session
-from .models import NodeRecord, ProcessDiagramRecord
+from .models import NodeRecord, ProcessAssetGrantRecord, ProcessDiagramRecord
 from .process_schemas import ProcessCreate, ProcessUpdate
 
 router = APIRouter(prefix="/api")
@@ -54,17 +54,34 @@ def _serialize(body: ProcessCreate) -> str:
                       ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-def _validate_assets(session: Session, body: ProcessCreate, previous: dict | None = None) -> None:
-    # 旧引用按步骤 ID 保留。失效资产不能新增到另一步骤，也不能让新文档引用。
+def _remember_assets(session: Session, diagram_id: str, content: dict) -> None:
+    """记录曾合法保存的引用，删除步骤/解除引用后仍能通过撤销恢复。"""
+    pairs = {(node["id"], asset_id) for node in content["nodes"]
+             for asset_id in node.get("assetIds", [])}
+    if not pairs:
+        return
+    existing = set(session.query(ProcessAssetGrantRecord.node_id, ProcessAssetGrantRecord.asset_id)
+                   .filter(ProcessAssetGrantRecord.diagram_id == diagram_id).all())
+    session.add_all(ProcessAssetGrantRecord(diagram_id=diagram_id, node_id=node_id, asset_id=asset_id)
+                    for node_id, asset_id in pairs - existing)
+
+
+def _validate_assets(session: Session, body: ProcessCreate, previous: dict | None = None,
+                     diagram_id: str | None = None) -> None:
+    # 旧引用及历史授权按文档、步骤 ID 保留。失效资产不能新增到其他步骤/文档。
     old_assets = {node["id"]: set(node.get("assetIds", []))
                   for node in (previous or {}).get("nodes", [])}
-    added = {asset_id for node in body.nodes for asset_id in node.assetIds
+    added = {(node.id, asset_id) for node in body.nodes for asset_id in node.assetIds
              if asset_id not in old_assets.get(node.id, set())}
     if not added:
         return
     available = {record.id for record in session.query(NodeRecord).filter(
-        NodeRecord.id.in_(added), NodeRecord.type.in_(ASSET_TYPES), NodeRecord.vanished.is_(False))}
-    if added - available:
+        NodeRecord.id.in_({asset_id for _, asset_id in added}),
+        NodeRecord.type.in_(ASSET_TYPES), NodeRecord.vanished.is_(False))}
+    authorized = set(session.query(ProcessAssetGrantRecord.node_id, ProcessAssetGrantRecord.asset_id)
+                     .filter(ProcessAssetGrantRecord.diagram_id == diagram_id).all()) if diagram_id else set()
+    if any(asset_id not in available and (node_id, asset_id) not in authorized
+           for node_id, asset_id in added):
         raise HTTPException(422, "新增关联的资产不存在或已失效，请刷新资产列表")
 
 
@@ -81,6 +98,7 @@ def create_diagram(body: ProcessCreate, session: Session = Depends(get_session))
     record = ProcessDiagramRecord(id=f"process:{uuid4().hex}", name=body.name,
                                   description=body.description, content=_serialize(body))
     session.add(record)
+    _remember_assets(session, record.id, json.loads(record.content))
     session.commit()
     return _diagram(record)
 
@@ -101,7 +119,12 @@ def update_diagram(diagram_id: str, body: ProcessUpdate, session: Session = Depe
         raise HTTPException(404, "流程文档不存在")
     if record.revision != body.expected_revision:
         raise HTTPException(409, "流程已被其他页面修改，请刷新后再编辑")
-    _validate_assets(session, body, _content(record))
+    previous = _content(record)
+    # 兼容升级前的文档：在修改（包括直接删除步骤）前回填历史授权。
+    # 回填、校验和 CAS 写入处于同一事务，任何失败都不会留下授权。
+    _remember_assets(session, diagram_id, previous)
+    session.flush()
+    _validate_assets(session, body, previous, diagram_id)
     revision = uuid4().hex
     result = session.execute(update(ProcessDiagramRecord).where(
         ProcessDiagramRecord.id == diagram_id,
@@ -112,6 +135,7 @@ def update_diagram(diagram_id: str, body: ProcessUpdate, session: Session = Depe
     if result.rowcount != 1:
         session.rollback()
         raise HTTPException(409, "流程已被其他页面修改，请刷新后再编辑")
+    _remember_assets(session, diagram_id, {"nodes": [node.model_dump() for node in body.nodes]})
     session.refresh(record)
     saved = _diagram(record)
     session.commit()
@@ -132,6 +156,7 @@ def delete_diagram(diagram_id: str,
     if result.rowcount != 1:
         session.rollback()
         raise HTTPException(409, "流程已被其他页面修改，请刷新后再删除")
+    session.execute(delete(ProcessAssetGrantRecord).where(ProcessAssetGrantRecord.diagram_id == diagram_id))
     session.commit()
     return {"ok": True}
 

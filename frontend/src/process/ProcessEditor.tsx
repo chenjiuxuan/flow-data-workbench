@@ -1,6 +1,6 @@
 import {
   Background, BackgroundVariant, Controls, MarkerType, ReactFlow, SelectionMode,
-  applyEdgeChanges, applyNodeChanges, useReactFlow,
+  applyEdgeChanges, useReactFlow,
   type Connection, type Edge as FlowEdge, type EdgeChange, type NodeChange,
 } from '@xyflow/react'
 import {
@@ -8,7 +8,6 @@ import {
   LayoutOutlined, RedoOutlined, UndoOutlined,
 } from '@ant-design/icons'
 import { App as AntdApp, Button, Dropdown, Spin, Tooltip } from 'antd'
-import dagre from '@dagrejs/dagre'
 import { toBlob } from 'html-to-image'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ProcessNode, type ProcessFlowNode } from './components/ProcessNode'
@@ -16,6 +15,8 @@ import { ProcessPalette } from './components/ProcessPalette'
 import { ProcessProperties } from './components/ProcessProperties'
 import { PROCESS_NODE_META, PROCESS_NODE_TYPES } from './meta'
 import { useProcessStore } from './store'
+import { layoutProcess } from './layout'
+import { applyEditableNodeChanges, finalNodePositions } from '../utils/nodePositions'
 import type { ProcessBackup, ProcessNode as NodeRecord, ProcessNodeType } from './types'
 import './process.css'
 
@@ -133,6 +134,28 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
       return false
     }
   }, [message])
+
+  const changeNodes = useCallback((changes: NodeChange<ProcessFlowNode>[]) => {
+    const state = useProcessStore.getState()
+    const locked = state.busy || state.loading || !state.current
+    setFlowNodes((previous) => applyEditableNodeChanges(changes, previous, locked))
+    if (locked) return
+    const moved = finalNodePositions(changes)
+    if (!moved.size) return
+    void save(() => state.edit((draft) => {
+      for (const item of draft.nodes) {
+        const position = moved.get(item.id)
+        if (position) { item.x = position.x; item.y = position.y }
+      }
+    }), '').then((changed) => {
+      if (changed) return
+      const actual = new Map((useProcessStore.getState().current?.nodes ?? []).map((node) => [node.id, node]))
+      setFlowNodes((previous) => previous.map((node) => {
+        const saved = actual.get(node.id)
+        return moved.has(node.id) && saved ? { ...node, position: { x: saved.x, y: saved.y }, dragging: false } : node
+      }))
+    })
+  }, [save])
 
   const undo = useCallback(() => save(() => useProcessStore.getState().undo(), '已撤销并保存'), [save])
   const redo = useCallback(() => save(() => useProcessStore.getState().redo(), '已重做并保存'), [save])
@@ -257,20 +280,14 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
 
   const layout = async () => {
     if (readOnly || !nodes.length) return
-    const graph = new dagre.graphlib.Graph()
-    graph.setGraph({ rankdir: 'LR', nodesep: 70, ranksep: 110, marginx: 50, marginy: 50, acyclicer: 'greedy' })
-    graph.setDefaultEdgeLabel(() => ({}))
-    for (const node of nodes) graph.setNode(node.id, { width: PROCESS_NODE_META[node.type].width, height: PROCESS_NODE_META[node.type].height })
-    for (const edge of current!.edges) graph.setEdge(edge.source, edge.target)
-    dagre.layout(graph)
-    const positions = new Map(nodes.map((node) => {
-      const position = graph.node(node.id)
-      const meta = PROCESS_NODE_META[node.type]
-      return [node.id, { x: position.x - meta.width / 2, y: position.y - meta.height / 2 }] as const
-    }))
-    if (await save(() => useProcessStore.getState().edit((draft) => {
-      draft.nodes.forEach((node) => Object.assign(node, positions.get(node.id)))
-    }), '已整理布局')) fitSoon()
+    try {
+      const positions = layoutProcess(nodes, current!.edges)
+      if (await save(() => useProcessStore.getState().edit((draft) => {
+        draft.nodes.forEach((node) => Object.assign(node, positions.get(node.id)))
+      }), '已整理布局')) fitSoon()
+    } catch (error) {
+      message.error(`整理布局失败：${(error as Error).message}`)
+    }
   }
 
   const exportJson = () => {
@@ -288,23 +305,24 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
   const exportPng = async () => {
     const viewport = wrapperRef.current?.querySelector<HTMLElement>('.react-flow__viewport')
     if (!viewport || !current || !nodes.length) return
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-    for (const node of nodes) {
-      const meta = PROCESS_NODE_META[node.type]
-      minX = Math.min(minX, node.x); minY = Math.min(minY, node.y)
-      maxX = Math.max(maxX, node.x + meta.width); maxY = Math.max(maxY, node.y + meta.height)
-    }
-    for (const edge of viewport.querySelectorAll<SVGGraphicsElement>('.react-flow__edge-path')) {
-      const bounds = edge.getBBox()
-      minX = Math.min(minX, bounds.x); minY = Math.min(minY, bounds.y)
-      maxX = Math.max(maxX, bounds.x + bounds.width); maxY = Math.max(maxY, bounds.y + bounds.height)
-    }
-    minX -= 64; minY -= 64; maxX += 64; maxY += 64
-    const scale = Math.min(2, 1600 / (maxX - minX), 1200 / (maxY - minY))
-    const width = Math.max(320, Math.ceil((maxX - minX) * scale))
-    const height = Math.max(200, Math.ceil((maxY - minY) * scale))
     setExporting(true)
     try {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+      for (const node of nodes) {
+        const meta = PROCESS_NODE_META[node.type]
+        minX = Math.min(minX, node.x); minY = Math.min(minY, node.y)
+        maxX = Math.max(maxX, node.x + meta.width); maxY = Math.max(maxY, node.y + meta.height)
+      }
+      // 整个 edge group 的 bbox 包含标签变换；只量 path 会裁掉长条件文字。
+      for (const edge of viewport.querySelectorAll<SVGGraphicsElement>('.react-flow__edge')) {
+        const bounds = edge.getBBox()
+        minX = Math.min(minX, bounds.x); minY = Math.min(minY, bounds.y)
+        maxX = Math.max(maxX, bounds.x + bounds.width); maxY = Math.max(maxY, bounds.y + bounds.height)
+      }
+      minX -= 64; minY -= 64; maxX += 64; maxY += 64
+      const scale = Math.min(2, 1600 / (maxX - minX), 1200 / (maxY - minY))
+      const width = Math.max(320, Math.ceil((maxX - minX) * scale))
+      const height = Math.max(200, Math.ceil((maxY - minY) * scale))
       const blob = await toBlob(viewport, {
         backgroundColor: '#f8fafc', width, height, pixelRatio: 2,
         style: { width: `${width}px`, height: `${height}px`, transform: `translate(${-minX * scale}px, ${-minY * scale}px) scale(${scale})` },
@@ -358,7 +376,7 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
             nodes={flowNodes}
             edges={flowEdges}
             nodeTypes={nodeTypes}
-            onNodesChange={(changes: NodeChange<ProcessFlowNode>[]) => setFlowNodes((previous) => applyNodeChanges(changes, previous))}
+            onNodesChange={changeNodes}
             onEdgesChange={(changes: EdgeChange<FlowEdge>[]) => setFlowEdges((previous) => applyEdgeChanges(changes, previous))}
             onConnect={(connection) => void connect(connection)}
             isValidConnection={validConnection}
@@ -376,21 +394,6 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
             onEdgeClick={(_, edge) => useProcessStore.getState().select({ kind: 'edge', id: edge.id })}
             onPaneClick={() => useProcessStore.getState().select(null)}
             onPaneContextMenu={(event) => event.preventDefault()}
-            onNodeDragStop={async (_event, node, dragged) => {
-              const state = useProcessStore.getState()
-              if (state.busy || state.loading) return
-              const moved = new Map((dragged.length ? dragged : [node]).map((item) => [item.id, item.position]))
-              const changed = await save(() => state.edit((draft) => {
-                for (const item of draft.nodes) {
-                  const position = moved.get(item.id)
-                  if (position) { item.x = position.x; item.y = position.y }
-                }
-              }), '')
-              if (!changed) setFlowNodes((previous) => previous.map((item) => {
-                const actual = useProcessStore.getState().current?.nodes.find((candidate) => candidate.id === item.id)
-                return actual ? { ...item, position: { x: actual.x, y: actual.y }, dragging: false } : item
-              }))
-            }}
             proOptions={{ hideAttribution: true }}
           >
             <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#d9e1eb" />

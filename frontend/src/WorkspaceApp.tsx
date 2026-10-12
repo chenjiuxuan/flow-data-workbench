@@ -97,7 +97,7 @@ export default function WorkspaceApp() {
         setDirectoryOpen(false)
         message.success('流程图已创建')
       } else {
-        await useProcessStore.getState().rename(editing.id, values.name.trim(), values.description?.trim() || '')
+        await useProcessStore.getState().rename(editing.id, values.name.trim(), values.description?.trim() || '', editing.revision)
         message.success('流程信息已保存')
       }
       setEditing(null)
@@ -111,7 +111,7 @@ export default function WorkspaceApp() {
     okText: '删除流程图', okType: 'danger',
     onOk: async () => {
       try {
-        await useProcessStore.getState().remove(document.id)
+        await useProcessStore.getState().remove(document.id, document.revision)
         if (active === document.id) setActive('data')
         message.success('流程图已删除')
       } catch (e) { message.error(`删除失败：${(e as Error).message}`); throw e }
@@ -140,7 +140,8 @@ export default function WorkspaceApp() {
   }
 
   const activeSummary = active === 'data' ? null : diagrams.find((d) => d.id === active)
-  const documentName = active === 'data' ? '数据关系总图' : activeSummary?.name || '流程图'
+  const documentName = active === 'data' ? '数据关系总图'
+    : current?.id === active ? current.name : activeSummary?.name || '流程图'
 
   return (
     <div className="workspace-shell">
