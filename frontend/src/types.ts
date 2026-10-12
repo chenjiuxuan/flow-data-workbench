@@ -12,6 +12,7 @@ export interface GraphNode {
   x: number
   y: number
   manualFields: string[]
+  provenance?: Record<string, unknown>
 }
 
 export interface GraphEdge {
@@ -24,11 +25,22 @@ export interface GraphEdge {
   origin: 'auto' | 'manual'
   vanished: boolean
   manualFields: string[]
+  provenance?: Record<string, unknown>
 }
 
 export interface GraphData {
   nodes: GraphNode[]
   edges: GraphEdge[]
+}
+
+/** 完整图备份，包含隐藏节点、所有视图与采集来源信息。 */
+export interface GraphBackup extends GraphData {
+  revision: string
+}
+
+export interface RestoreResult {
+  revision: string
+  [key: string]: number | string
 }
 
 export interface MergeReport {
@@ -53,6 +65,7 @@ export interface SqlImportResult {
     statements: string[]
   }[]
   errors: string[]
+  warnings: string[]
   report: MergeReport | null
 }
 

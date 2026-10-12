@@ -50,10 +50,13 @@ def _cell_str(value) -> str:
 def parse_excel(content: bytes) -> tuple[list[NodeDraft], list[EdgeDraft], list[str]]:
     """返回 (节点草稿, 边草稿, 错误列表)。"""
     wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-    if TEMPLATE_SHEET not in wb.sheetnames:
-        raise ValueError(f"缺少工作表「{TEMPLATE_SHEET}」，请使用下载的模板填写")
-    ws = wb[TEMPLATE_SHEET]
-    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    try:
+        if TEMPLATE_SHEET not in wb.sheetnames:
+            raise ValueError(f"缺少工作表「{TEMPLATE_SHEET}」，请使用下载的模板填写")
+        ws = wb[TEMPLATE_SHEET]
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+    finally:
+        wb.close()
 
     nodes: dict[str, NodeDraft] = {}
     edges: dict[str, EdgeDraft] = {}
@@ -74,8 +77,8 @@ def parse_excel(content: bytes) -> tuple[list[NodeDraft], list[EdgeDraft], list[
         nodes[dst_id] = NodeDraft(dst_id, "external" if "外部" in dst_kind else "system", dst_name)
 
         attrs = {"method": method, "frequency": freq, "owner": owner, "note": note, "content": content}
-        if fields:
-            attrs["fields"] = [f.strip() for f in re.split(r"[,;，；]", fields) if f.strip()]
+        # 空单元格是明确清空；省略键会让 merge 错误地保留上次的自动映射。
+        attrs["fields"] = [f.strip() for f in re.split(r"[,;，；]", fields) if f.strip()]
 
         edge = EdgeDraft(
             id=flow_id(src_id, dst_id, content or method or "data"),

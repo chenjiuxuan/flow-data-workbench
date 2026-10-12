@@ -1,5 +1,12 @@
 /** 后端 API 封装。 */
-import type { DbDiscoverResult, ExcelImportResult, GraphData, MergeReport, SqlImportResult } from '../types'
+import type { DbDiscoverResult, ExcelImportResult, GraphBackup, GraphData, MergeReport, RestoreResult, SqlImportResult } from '../types'
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, init)
@@ -7,11 +14,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     let detail = `${resp.status}`
     try {
       const body = await resp.json()
-      detail = body.detail ?? JSON.stringify(body)
+      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail ?? body)
     } catch {
       /* 非 JSON 错误体 */
     }
-    throw new Error(detail)
+    throw new ApiError(detail, resp.status)
   }
   return resp.json() as Promise<T>
 }
@@ -24,6 +31,8 @@ const json = (data: unknown): RequestInit => ({
 
 export const api = {
   graph: (view: string) => request<GraphData>(`/api/graph?view=${view}`),
+
+  exportJson: () => request<GraphBackup>('/api/export/json'),
 
   trace: (nodeId: string, direction: string) =>
     request<GraphData>(`/api/trace/${encodeURIComponent(nodeId)}?direction=${direction}`),
@@ -72,5 +81,5 @@ export const api = {
 
   seedDemo: () => request<MergeReport>('/api/seed/demo', { method: 'POST' }),
 
-  restoreJson: (data: unknown) => request<Record<string, number>>('/api/import/json', json(data)),
+  restoreJson: (data: unknown) => request<RestoreResult>('/api/import/json', json(data)),
 }

@@ -1,17 +1,12 @@
-/** 主画布：渲染图、拖拽建点、连线建边、选择、追溯高亮、右键菜单。
-
-非受控模式：节点/边直接作为 ReactFlow 初始值传入，不接 onNodesChange/onEdgesChange，
-避免受控模式下 useEffect setState 与内部 store 的时序竞态。
-节点位置由 onNodeDragStop 单点保存；选中/删除由 getNodes/getEdges 读取。
-*/
+/** 完整受控画布：拖动/选择先更新临时状态，结束后以一次原子编辑保存。 */
 import {
   Background, Controls, MiniMap, ReactFlow, useReactFlow,
   SelectionMode,
-  type Connection, type Edge as RfEdge,
+  applyNodeChanges, applyEdgeChanges,
+  type Connection, type Edge as RfEdge, type NodeChange, type EdgeChange,
 } from '@xyflow/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { App as AntdApp } from 'antd'
-import { api } from '../api/client'
 import { useStore } from '../store'
 import type { GraphNode } from '../types'
 import { DataNode, type DataFlowNodeType } from './DataNode'
@@ -27,24 +22,18 @@ interface MenuItem {
 
 export function FlowCanvas() {
   const { message, modal } = AntdApp.useApp()
-  const { screenToFlowPosition, getNodes } = useReactFlow()
+  const { screenToFlowPosition } = useReactFlow()
   const nodes = useStore((s) => s.nodes)
   const edges = useStore((s) => s.edges)
   const trace = useStore((s) => s.trace)
   const select = useStore((s) => s.select)
-  const refresh = useStore((s) => s.refresh)
+  const canvasSelection = useStore((s) => s.canvasSelection)
+  const busy = useStore((s) => s.busy)
+  const [rfNodes, setRfNodes] = useState<DataFlowNodeType[]>([])
+  const [rfEdges, setRfEdges] = useState<RfEdge[]>([])
   const [menu, setMenu] = useState<{ x: number; y: number; node: GraphNode } | null>(null)
 
-  // 派生初始值：store 变化时直接替换整个 ReactFlow 子树（key 重建），
-  // 避免 onChange 处理器在受控模式里的双向同步问题。
-  // store 变化时派生值变化，ReactFlow 作为非受控组件，
-  // 新 props 会被内部 store 在下一帧同步（useNodesInternal）。
-  void useMemo(
-    () => `${nodes.length}|${edges.length}|${trace?.nodeIds.size ?? 0}|${nodes.map((n) => `${n.id}:${n.x.toFixed(1)}:${n.y.toFixed(1)}`).join(',')}`,
-    [nodes, edges, trace],
-  )
-
-  const rfNodes = useMemo(
+  const displayNodes = useMemo(
     (): DataFlowNodeType[] => nodes.map((n) => ({
       id: n.id,
       type: 'dataNode',
@@ -59,7 +48,7 @@ export function FlowCanvas() {
     [nodes, trace],
   )
 
-  const rfEdges = useMemo(
+  const displayEdges = useMemo(
     (): RfEdge[] => edges.map((e) => ({
       id: e.id,
       source: e.source,
@@ -82,6 +71,28 @@ export function FlowCanvas() {
     [edges, trace],
   )
 
+  useEffect(() => {
+    setRfNodes((previous) => displayNodes.map((node) => {
+      const old = previous.find((n) => n.id === node.id)
+      return {
+        ...old, ...node,
+        position: old?.dragging ? old.position : node.position,
+        selected: canvasSelection.nodes.includes(node.id),
+      }
+    }))
+  }, [displayNodes, canvasSelection])
+
+  useEffect(() => {
+    setRfEdges(displayEdges.map((edge) => ({ ...edge, selected: canvasSelection.edges.includes(edge.id) })))
+  }, [displayEdges, canvasSelection])
+
+  const onNodesChange = useCallback((changes: NodeChange<DataFlowNodeType>[]) => {
+    setRfNodes((current) => applyNodeChanges(changes, current))
+  }, [])
+  const onEdgesChange = useCallback((changes: EdgeChange<RfEdge>[]) => {
+    setRfEdges((current) => applyEdgeChanges(changes, current))
+  }, [])
+
   const onDrop = useCallback(
     async (event: React.DragEvent) => {
       event.preventDefault()
@@ -90,14 +101,13 @@ export function FlowCanvas() {
       const name = `${TYPE_FALLBACK_NAME[type] ?? '新节点'} ${Date.now() % 10000}`
       const position = screenToFlowPosition({ x: event.clientX, y: event.clientY })
       try {
-        await api.createNode({ type, name, x: position.x, y: position.y })
-        await refresh()
+        await useStore.getState().createNode({ type, name, x: position.x, y: position.y })
         message.success(`已创建 ${name}`)
       } catch (e) {
         message.error(`创建失败：${(e as Error).message}`)
       }
     },
-    [screenToFlowPosition, refresh, message],
+    [screenToFlowPosition, message],
   )
 
   const onConnect = useCallback(
@@ -108,53 +118,27 @@ export function FlowCanvas() {
         return
       }
       try {
-        await api.createEdge({ source_id: connection.source, target_id: connection.target, type: 'flow', label: '数据流' })
-        await refresh()
+        await useStore.getState().createEdge({ source: connection.source, target: connection.target, type: 'flow', label: '数据流' })
         message.success('已建立数据流')
       } catch (e) {
         message.error(`连线失败：${(e as Error).message}`)
       }
     },
-    [refresh, message],
+    [message],
   )
 
-  // 节点拖动结束：读取内部 store 当前选中节点，整组保存位置到后端
+  // React Flow 传入实际拖动的一组节点，不要求节点事先被选中。
   const onNodeDragStop = useCallback(
-    () => {
-      const selected = getNodes().filter((n) => n.selected)
-      if (selected.length === 0) return
-      useStore.setState((s) => ({
-        nodes: s.nodes.map((n) => {
-          const t = selected.find((x) => x.id === n.id)
-          return t ? { ...n, x: t.position.x, y: t.position.y } : n
-        }),
-      }))
-      void api.saveLayout(
-        Object.fromEntries(selected.map((t) => [t.id, [t.position.x, t.position.y] as [number, number]])),
-      )
+    async (_event: React.MouseEvent, node: DataFlowNodeType, dragged: DataFlowNodeType[]) => {
+      const moved = dragged.length ? dragged : [node]
+      try {
+        await useStore.getState().saveLayout(Object.fromEntries(moved.map((n) => [n.id, n.position])))
+      } catch (error) {
+        message.error(`位置保存失败：${(error as Error).message}`)
+        await useStore.getState().refresh().catch(() => undefined)
+      }
     },
-    [getNodes],
-  )
-
-  // Delete 键删除选中（React Flow 已移除内部状态，这里同步后端）
-  const onNodesDelete = useCallback(
-    async (deleted: DataFlowNodeType[]) => {
-      for (const n of deleted) await api.deleteNode(n.id)
-      select(null)
-      await refresh()
-      message.success(`已删除 ${deleted.length} 个节点`)
-    },
-    [select, refresh, message],
-  )
-
-  const onEdgesDelete = useCallback(
-    async (deleted: RfEdge[]) => {
-      for (const e of deleted) await api.deleteEdge(e.id)
-      select(null)
-      await refresh()
-      message.success(`已删除 ${deleted.length} 条连线`)
-    },
-    [select, refresh, message],
+    [message],
   )
 
   const deleteNode = useCallback(
@@ -164,19 +148,26 @@ export function FlowCanvas() {
         content: '同时删除与它相连的所有数据流。',
         okType: 'danger',
         onOk: async () => {
-          await api.deleteNode(node.id)
-          select(null)
-          await refresh()
+          try {
+            await useStore.getState().deleteItems([node.id])
+          } catch (error) {
+            message.error(`删除失败：${(error as Error).message}`)
+            throw error
+          }
         },
       })
     },
-    [modal, select, refresh],
+    [modal, message],
   )
 
   const traceFrom = useCallback(
     async (node: GraphNode, direction: 'upstream' | 'downstream') => {
-      await useStore.getState().runTrace(node.id, direction)
-      message.success(direction === 'upstream' ? '已高亮全部上游' : '已高亮全部下游')
+      try {
+        await useStore.getState().runTrace(node.id, direction)
+        message.success(direction === 'upstream' ? '已高亮全部上游' : '已高亮全部下游')
+      } catch (error) {
+        message.error(`追溯失败：${(error as Error).message}`)
+      }
     },
     [message],
   )
@@ -209,19 +200,34 @@ export function FlowCanvas() {
         nodes={rfNodes}
         edges={rfEdges}
         nodeTypes={nodeTypes}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        nodesDraggable={!busy}
+        nodesConnectable={!busy}
         fitView
         minZoom={0.1}
         selectionOnDrag
         panOnDrag={[1, 2]}
         selectionMode={SelectionMode.Partial}
         deleteKeyCode={['Delete', 'Backspace']}
+        onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) =>
+          useStore.getState().setCanvasSelection(selectedNodes.map((n) => n.id), selectedEdges.map((e) => e.id))}
         onNodeClick={(_, node) => select({ kind: 'node', id: node.id })}
-        onPaneClick={() => select(null)}
         onEdgeClick={(_, edge) => select({ kind: 'edge', id: edge.id })}
+        onPaneClick={() => select(null)}
         onConnect={onConnect}
         onNodeDragStop={onNodeDragStop}
-        onNodesDelete={onNodesDelete}
-        onEdgesDelete={onEdgesDelete}
+        onBeforeDelete={async ({ nodes: deletedNodes, edges: deletedEdges }) => {
+          if (busy) return false
+          try {
+            const changed = await useStore.getState().deleteItems(deletedNodes.map((n) => n.id), deletedEdges.map((e) => e.id))
+            if (changed) message.success('已删除选中项')
+          } catch (error) {
+            message.error(`删除失败：${(error as Error).message}`)
+          }
+          // 只由成功保存后的完整图更新受控数据，避免节点/边分两次删除。
+          return false
+        }}
         onNodeContextMenu={onNodeContextMenu}
         onPaneContextMenu={(event) => event.preventDefault()}
       >

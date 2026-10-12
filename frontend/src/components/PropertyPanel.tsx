@@ -1,7 +1,6 @@
 /** 右侧属性面板：查看/编辑选中的节点或连线。 */
 import { App as AntdApp, Button, Descriptions, Drawer, Form, Input, Popconfirm, Select, Space, Tag, Typography } from 'antd'
 import { useEffect } from 'react'
-import { api } from '../api/client'
 import { useStore } from '../store'
 import { NODE_TYPE_META, EDGE_TYPE_LABEL } from './meta'
 
@@ -48,32 +47,42 @@ export function PropertyPanel() {
   const close = () => store.select(null)
 
   const save = async () => {
-    const values = await form.validateFields()
-    if (!values.name?.trim()) {
-      message.error('名称不能为空')
-      return
+    try {
+      const values = await form.validateFields()
+      if (!values.name?.trim()) {
+        message.error('名称不能为空')
+        return
+      }
+      // 空字符串以 null 下发，统一编辑入口删除属性并标记人工维护。
+      const attrs: Record<string, unknown> = {}
+      for (const { key } of ATTR_FIELDS) {
+        const v = values[key]
+        attrs[key] = v === undefined || String(v).trim() === '' ? null : v
+      }
+      if (node) {
+        await store.patchNode(node.id, { name: values.name.trim(), attrs })
+      } else if (edge) {
+        await store.patchEdge(edge.id, { label: values.name.trim(), attrs })
+      }
+      message.success('已保存（人工修改的字段不会再被自动采集覆盖）')
+    } catch (error) {
+      if (error instanceof Error) message.error(`保存失败：${error.message}`)
     }
-    // 空字符串以 null 下发，后端删除该属性
-    const attrs: Record<string, unknown> = {}
-    for (const { key } of ATTR_FIELDS) {
-      const v = values[key]
-      attrs[key] = v === undefined || String(v).trim() === '' ? null : v
-    }
-    if (node) {
-      await api.patchNode(node.id, { name: values.name.trim(), attrs })
-    } else if (edge) {
-      await api.patchEdge(edge.id, { label: values.name.trim(), attrs })
-    }
-    await store.refresh()
-    store.select(selection)
-    message.success('已保存（人工修改的字段不会再被自动采集覆盖）')
   }
 
   const remove = async () => {
-    if (node) await api.deleteNode(node.id)
-    if (edge) await api.deleteEdge(edge.id)
-    store.select(null)
-    await store.refresh()
+    try {
+      await store.deleteItems(node ? [node.id] : [], edge ? [edge.id] : [])
+      message.success('已删除')
+    } catch (error) {
+      message.error(`删除失败：${(error as Error).message}`)
+    }
+  }
+
+  const trace = async (direction: 'upstream' | 'downstream') => {
+    if (!node) return
+    try { await store.runTrace(node.id, direction) }
+    catch (error) { message.error(`追溯失败：${(error as Error).message}`) }
   }
 
   const target = node ?? edge
@@ -83,6 +92,7 @@ export function PropertyPanel() {
   return (
     <Drawer
       open={!!selection}
+      mask={false}
       onClose={close}
       width={380}
       title={node ? '节点属性' : '连线属性'}
@@ -115,14 +125,14 @@ export function PropertyPanel() {
           ))}
 
           <Space style={{ marginBottom: 16 }} wrap>
-            <Button type="primary" onClick={() => void save()}>保存</Button>
+            <Button type="primary" disabled={store.busy} onClick={() => void save()}>保存</Button>
             <Popconfirm title="确定删除？" onConfirm={() => void remove()}>
-              <Button danger>删除</Button>
+              <Button danger disabled={store.busy}>删除</Button>
             </Popconfirm>
             {node && (
               <>
-                <Button onClick={() => void store.runTrace(node.id, 'upstream')}>追溯上游</Button>
-                <Button onClick={() => void store.runTrace(node.id, 'downstream')}>追溯下游</Button>
+                <Button onClick={() => void trace('upstream')}>追溯上游</Button>
+                <Button onClick={() => void trace('downstream')}>追溯下游</Button>
               </>
             )}
           </Space>

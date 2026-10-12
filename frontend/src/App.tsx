@@ -47,44 +47,46 @@ export default function App() {
   const nodes = useStore((s) => s.nodes)
   const edges = useStore((s) => s.edges)
   const setView = useStore((s) => s.setView)
-  const refresh = useStore((s) => s.refresh)
+  const initialize = useStore((s) => s.initialize)
   const loading = useStore((s) => s.loading)
-  // undo/redo 后让 ReactFlow 重新 fitView（节点位置变了）
-  const [, setUndoRedoTick] = useState(0)
-  const undo = useCallback(() => {
-    useStore.temporal.getState().undo()
-    setUndoRedoTick((t) => t + 1)
-    setTimeout(() => fitView({ duration: 300, padding: 0.15 }), 50)
-    message.info('已撤销')
-  }, [message, fitView])
-  const redo = useCallback(() => {
-    useStore.temporal.getState().redo()
-    setUndoRedoTick((t) => t + 1)
-    setTimeout(() => fitView({ duration: 300, padding: 0.15 }), 50)
-    message.info('已重做')
-  }, [message, fitView])
+  const busy = useStore((s) => s.busy)
+  const fitVersion = useStore((s) => s.fitVersion)
+  const canUndo = useStore((s) => s.past.length > 0)
+  const canRedo = useStore((s) => s.future.length > 0)
+  const undo = useCallback(async () => {
+    try {
+      if (await useStore.getState().undo()) message.success('已撤销并保存')
+    } catch (error) {
+      message.error(`撤销失败：${(error as Error).message}`)
+    }
+  }, [message])
+  const redo = useCallback(async () => {
+    try {
+      if (await useStore.getState().redo()) message.success('已重做并保存')
+    } catch (error) {
+      message.error(`重做失败：${(error as Error).message}`)
+    }
+  }, [message])
   const [importOpen, setImportOpen] = useState(false)
   const wrapperRef = useRef<HTMLDivElement>(null)
-  const hadNodesRef = useRef(false)
+  const fittedRef = useRef<{ view: ViewKey; version: number } | null>(null)
 
   const fitSoon = useCallback((delay = 150) => {
     setTimeout(() => fitView({ duration: 300, padding: 0.15 }), delay)
   }, [fitView])
 
-  // 把一组新位置写回 store 与后端，然后重新适配视野
+  // 显式布局与拖动使用同一原子编辑入口，可持久化撤销。
   const applyPositions = useCallback(
-    async (positions: Record<string, { x: number; y: number }>, silent = false) => {
-      useStore.setState({
-        nodes: nodes.map((n) => ({ ...n, x: positions[n.id]?.x ?? n.x, y: positions[n.id]?.y ?? n.y })),
-      })
-      const payload = Object.fromEntries(
-        Object.entries(positions).map(([id, p]) => [id, [p.x, p.y] as [number, number]]),
-      )
-      await api.saveLayout(payload)
-      fitSoon()
-      if (!silent) message.success('已自动布局')
+    async (positions: Record<string, { x: number; y: number }>) => {
+      try {
+        await useStore.getState().saveLayout(positions)
+        fitSoon()
+        message.success('已自动布局')
+      } catch (error) {
+        message.error(`布局失败：${(error as Error).message}`)
+      }
     },
-    [nodes, fitSoon, message],
+    [fitSoon, message],
   )
 
   const relayoutAll = useCallback(
@@ -97,23 +99,17 @@ export default function App() {
 
   const onLayoutClick = useCallback(() => void relayoutAll(), [relayoutAll])
 
-  // 初始加载与视图切换后重新适配视野
   useEffect(() => {
-    void (async () => {
-      if (!hadNodesRef.current && nodes.length === 0) {
-        await setView('system')
-      }
-      if (nodes.length > 0 && !hadNodesRef.current) {
-        hadNodesRef.current = true
-        fitSoon()
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes.length])
+    void initialize().catch((error: Error) => message.error(`加载失败：${error.message}`))
+  }, [initialize, message])
 
+  // 等新视图数据真正到达后再适配；导入的新节点也会进入视野。
   useEffect(() => {
-    if (hadNodesRef.current) fitSoon(100)
-  }, [view, fitSoon])
+    if (nodes.length > 0 && (fittedRef.current?.view !== view || fittedRef.current.version !== fitVersion)) {
+      fittedRef.current = { view, version: fitVersion }
+      fitSoon()
+    }
+  }, [nodes.length, view, fitVersion, fitSoon])
 
   // 撤销/重做/清空：Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y
   useEffect(() => {
@@ -121,19 +117,20 @@ export default function App() {
       // 输入框/文本框内不拦截
       const tag = (event.target as HTMLElement).tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (event.target as HTMLElement).isContentEditable) return
+      if (useStore.getState().busy) return
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'z') {
         event.preventDefault()
-        redo()
+        void redo()
         return
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault()
-        undo()
+        void undo()
         return
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
         event.preventDefault()
-        redo()
+        void redo()
         return
       }
     }
@@ -141,31 +138,15 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [undo, redo])
 
-  // 清空撤销栈：演示数据/JSON 恢复本身不可撤销
-  useEffect(() => {
-    useStore.temporal.getState().clear()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // 堆叠检测：自动采集/导入产生的节点没有坐标，会堆在 (0,0)。
-  // 大部分节点都堆着 → 整图自动布局；只是新增的少数节点堆着 → 排到现有内容右侧一列。
-  useEffect(() => {
-    if (nodes.length < 2) return
-    const piled = nodes.filter((n) => n.x === 0 && n.y === 0)
-    if (piled.length < 2) return
-
-    if (piled.length >= nodes.length / 2) {
-      void relayoutAll()
-      return
+  const seedDemo = useCallback(async () => {
+    try {
+      await useStore.getState().runExternal(api.seedDemo, { view: () => 'system' })
+      fitSoon()
+      message.success('演示数据已就绪')
+    } catch (error) {
+      message.error(`演示数据加载失败：${(error as Error).message}`)
     }
-    const maxX = Math.max(...nodes.map((n) => n.x))
-    const positions: Record<string, { x: number; y: number }> = {}
-    piled.forEach((n, i) => {
-      positions[n.id] = { x: maxX + NODE_W + 120, y: 80 + i * (NODE_H + 50) }
-    })
-    void applyPositions(positions, true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes])
+  }, [fitSoon, message])
 
   const exportPng = async () => {
     const viewportEl = wrapperRef.current?.querySelector('.react-flow__viewport') as HTMLElement | null
@@ -215,7 +196,7 @@ export default function App() {
         <div style={{ fontWeight: 700, fontSize: 16, color: '#1677ff' }}> 数据流梳理平台</div>
         <Segmented
           value={view}
-          onChange={(v) => void setView(v as ViewKey)}
+          onChange={(v) => void setView(v as ViewKey).catch((error: Error) => message.error(`视图加载失败：${error.message}`))}
           options={[
             { value: 'system', label: '系统视图' },
             { value: 'business', label: '业务视图' },
@@ -228,45 +209,44 @@ export default function App() {
         <div style={{ flex: 1 }} />
         <Space size="small">
           <Tooltip title="撤销上一步（Ctrl+Z）">
-            <Button size="small" icon={<UndoOutlined />} onClick={() => undo()}>撤销</Button>
+            <Button size="small" disabled={!canUndo || busy} icon={<UndoOutlined />} onClick={() => void undo()}>撤销</Button>
           </Tooltip>
           <Tooltip title="重做（Ctrl+Shift+Z 或 Ctrl+Y）">
-            <Button size="small" icon={<RedoOutlined />} onClick={() => redo()}>重做</Button>
+            <Button size="small" disabled={!canRedo || busy} icon={<RedoOutlined />} onClick={() => void redo()}>重做</Button>
           </Tooltip>
           <Divider type="vertical" style={{ height: 20 }} />
           <Tooltip title="按流向自动排列">
-            <Button size="small" icon={<LayoutOutlined />} onClick={onLayoutClick}>自动布局</Button>
+            <Button size="small" disabled={busy || !nodes.length} icon={<LayoutOutlined />} onClick={onLayoutClick}>自动布局</Button>
           </Tooltip>
-          <Button size="small" type="primary" icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>导入 / 采集</Button>
+          <Button size="small" type="primary" disabled={busy} icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>导入 / 采集</Button>
           <Tooltip title="导出当前视图为 PNG">
             <Button size="small" icon={<DownloadOutlined />} onClick={() => void exportPng()}>导出图片</Button>
           </Tooltip>
           <Upload
             accept=".json"
             showUploadList={false}
-            customRequest={async ({ file }) => {
+            disabled={busy}
+            customRequest={async ({ file, onSuccess, onError }) => {
               try {
                 const text = await (file as File).text()
                 const payload = JSON.parse(text)
-                await api.restoreJson({ ...payload, mode: 'merge' })
-                await refresh()
+                await useStore.getState().runExternal(() => api.restoreJson({ ...payload, mode: 'merge' }), { layout: false })
+                onSuccess?.({})
                 message.success('备份已恢复')
               } catch (e) {
+                onError?.(e as Error)
                 message.error(`恢复失败：${(e as Error).message}`)
               }
             }}
           >
-            <Button size="small" icon={<ReloadOutlined />}>恢复备份</Button>
+            <Button size="small" disabled={busy} icon={<ReloadOutlined />}>恢复备份</Button>
           </Upload>
           <Tooltip title="重新并入内置演示数据（幂等，不影响你的修改）">
             <Button
               size="small"
+              disabled={busy}
               icon={<ThunderboltOutlined />}
-              onClick={async () => {
-                await api.seedDemo()
-                await refresh()
-                message.success('演示数据已就绪')
-              }}
+              onClick={() => void seedDemo()}
             >
               演示数据
             </Button>
@@ -292,11 +272,7 @@ export default function App() {
               <div style={{ fontSize: 16, marginBottom: 8, color: '#666' }}>画布还是空的</div>
               <div style={{ fontSize: 13 }}>
                 从左侧拖拽节点到画布，或点击
-                <Button type="link" size="small" onClick={async () => {
-                  await api.seedDemo()
-                  await refresh()
-                  message.success('演示数据已就绪')
-                }}>
+                <Button type="link" disabled={busy} size="small" onClick={() => void seedDemo()}>
                   演示数据
                 </Button>
                 快速体验

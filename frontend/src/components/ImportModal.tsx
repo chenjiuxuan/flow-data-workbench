@@ -6,12 +6,12 @@ import {
 import { useState } from 'react'
 import { api } from '../api/client'
 import { useStore } from '../store'
-import type { MergeReport } from '../types'
+import type { MergeReport, ViewKey } from '../types'
 
 const { Text } = Typography
 const { TextArea } = Input
 
-function ReportView({ report, extra }: { report: MergeReport | null; extra?: React.ReactNode }) {
+function ReportView({ report, warnings = false }: { report: MergeReport | null; warnings?: boolean }) {
   if (!report) return null
   const rows = [
     { item: '新增节点', count: report.added_nodes.length },
@@ -24,8 +24,8 @@ function ReportView({ report, extra }: { report: MergeReport | null; extra?: Rea
   return (
     <div style={{ marginTop: 12 }}>
       <Alert
-        type="success"
-        message="并入完成"
+        type={warnings ? 'warning' : 'success'}
+        message={warnings ? '已并入可用结果，请检查提示' : '并入完成'}
         description={
           <Table
             size="small"
@@ -39,23 +39,28 @@ function ReportView({ report, extra }: { report: MergeReport | null; extra?: Rea
           />
         }
       />
-      {extra}
     </div>
   )
 }
 
 /** 导入结果如果落在别的视图（如 SQL 血缘进字段视图），自动切过去让用户立刻看到。 */
-async function switchViewForImports(addedIds: string[] | undefined) {
-  if (!addedIds?.length) return
-  const store = useStore.getState()
-  const hasTable = addedIds.some((id) => id.startsWith('tbl:'))
-  const hasSystem = addedIds.some((id) => id.startsWith('sys:') || id.startsWith('db:'))
-  if (hasTable && store.view !== 'field') await store.setView('field')
-  else if (hasSystem && store.view === 'field') await store.setView('system')
+function importView(report: MergeReport | null): ViewKey | undefined {
+  const ids = [...(report?.added_nodes ?? []), ...(report?.updated_nodes ?? [])]
+  const hasTable = ids.some((id) => id.startsWith('tbl:') || id.startsWith('physical-tbl:'))
+  const hasSystem = ids.some((id) => id.startsWith('sys:') || id.startsWith('db:'))
+  if (hasTable) return 'field'
+  if (hasSystem && useStore.getState().view === 'field') return 'system'
 }
 
-function ExcelTab({ onDone }: { onDone: () => void }) {
+function ImportErrors({ errors }: { errors: string[] }) {
+  if (!errors.length) return null
+  return <Alert type="error" showIcon message="存在错误，未写入图，请修正后重试"
+    description={errors.slice(0, 5).map((error, i) => <div key={i}>{error}</div>)} />
+}
+
+function ExcelTab() {
   const { message } = AntdApp.useApp()
+  const busy = useStore((s) => s.busy)
   const [result, setResult] = useState<React.ReactNode>(null)
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
@@ -68,24 +73,24 @@ function ExcelTab({ onDone }: { onDone: () => void }) {
         </Button>
         <Upload
           accept=".xlsx"
+          disabled={busy}
           showUploadList={false}
-          customRequest={async ({ file }) => {
+          customRequest={async ({ file, onSuccess, onError }) => {
             try {
-              const r = await api.importExcel(file as File, true)
-              setResult(<ReportView report={r.report} extra={r.errors.length > 0 && (
-                <Alert style={{ marginTop: 8 }} type="warning" showIcon
-                  message={`${r.errors.length} 行有问题`}
-                  description={r.errors.slice(0, 5).map((e: string, i: number) => <div key={i}>{e}</div>)} />
-              )} />)
-              await switchViewForImports(r.report?.added_nodes)
-              onDone()
-              message.success('Excel 已导入')
+              const r = await useStore.getState().runExternal(() => api.importExcel(file as File, true), {
+                view: (result) => importView(result.report), applied: (result) => result.report !== null,
+              })
+              setResult(<><ImportErrors errors={r.errors} /><ReportView report={r.report} /></>)
+              onSuccess?.(r)
+              if (r.errors.length) message.error('存在错误，未写入图，请修正后重试')
+              else if (r.report) message.success('Excel 已导入')
             } catch (e) {
+              onError?.(e as Error)
               message.error(`导入失败：${(e as Error).message}`)
             }
           }}
         >
-          <Button type="primary" icon={<FileExcelOutlined />}>上传 Excel 并入图</Button>
+          <Button type="primary" disabled={busy} icon={<FileExcelOutlined />}>上传 Excel 并入图</Button>
         </Upload>
       </Space>
       {result}
@@ -93,32 +98,42 @@ function ExcelTab({ onDone }: { onDone: () => void }) {
   )
 }
 
-function SqlTab({ onDone }: { onDone: () => void }) {
+function SqlTab() {
   const { message } = AntdApp.useApp()
   const [form] = Form.useForm()
   const [result, setResult] = useState<Awaited<ReturnType<typeof api.importSql>> | null>(null)
+  const [loading, setLoading] = useState(false)
+  const busy = useStore((s) => s.busy)
 
   const run = async (apply: boolean) => {
-    const values = await form.validateFields()
     try {
-      const r = await api.importSql({ ...values, apply })
+      const values = await form.validateFields()
+      setLoading(true)
+      const r = apply
+        ? await useStore.getState().runExternal(() => api.importSql({ ...values, apply }), {
+            view: (result) => importView(result.report), applied: (result) => result.report !== null,
+          })
+        : await api.importSql({ ...values, apply })
       setResult(r)
-      if (apply) {
-        await switchViewForImports(r.report?.added_nodes)
-        onDone()
-        message.success('SQL 血缘已并入图（可在字段视图查看）')
+      if (r.errors.length) {
+        message.error('存在错误，未写入图，请修正后重试')
+      } else if (apply && r.report) {
+        if (r.warnings?.length) message.warning('SQL 血缘已并入图，请检查字段解析提示')
+        else message.success('SQL 血缘已并入图（可在字段视图查看）')
       } else {
         message.info(`解析出 ${Object.keys(r.tables).length} 张表、${r.edges.length} 条血缘（未入图）`)
       }
     } catch (e) {
-      message.error(`解析失败：${(e as Error).message}`)
+      if (e instanceof Error) message.error(`解析失败：${e.message}`)
+    } finally {
+      setLoading(false)
     }
   }
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <Text type="secondary">
-        粘贴建表/同步/加工作业 SQL（INSERT-SELECT、CREATE TABLE AS、UPDATE、MERGE），自动解析表级+字段级血缘。
+        粘贴建表/同步/加工作业 SQL，解析表级及可确定的字段血缘。MERGE 目前提供表级血缘；未知结构的 * 需要补充表结构后确认字段。
       </Text>
       <Form form={form} layout="vertical" initialValues={{ dialect: 'mysql', source_name: 'SQL 脚本' }} size="small">
         <Space>
@@ -133,17 +148,18 @@ function SqlTab({ onDone }: { onDone: () => void }) {
           <TextArea rows={10} style={{ fontFamily: 'monospace' }} placeholder={'INSERT INTO dw.dwd_order\nSELECT ... FROM ods.orders'} />
         </Form.Item>
         <Space>
-          <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => void run(true)}>解析并入图</Button>
-          <Button onClick={() => void run(false)}>仅预览</Button>
+          <Button type="primary" loading={loading} disabled={busy} icon={<ThunderboltOutlined />} onClick={() => void run(true)}>解析并入图</Button>
+          <Button disabled={busy || loading} onClick={() => void run(false)}>仅预览</Button>
         </Space>
       </Form>
       {result && (
         <>
-          {result.errors.length > 0 && (
-            <Alert type="warning" showIcon message={`${result.errors.length} 条语句解析失败`}
-              description={result.errors.slice(0, 3).map((e, i) => <div key={i}>{e}</div>)} />
+          <ImportErrors errors={result.errors} />
+          {!!result.warnings?.length && (
+            <Alert type="warning" showIcon message="部分字段需要确认"
+              description={result.warnings.map((warning, i) => <div key={i}>{warning}</div>)} />
           )}
-          <ReportView report={result.report} />
+          <ReportView report={result.report} warnings={!!result.warnings?.length} />
           {result.edges.length > 0 && (
             <Table
               size="small"
@@ -164,22 +180,25 @@ function SqlTab({ onDone }: { onDone: () => void }) {
   )
 }
 
-function DbTab({ onDone }: { onDone: () => void }) {
+function DbTab() {
   const { message } = AntdApp.useApp()
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
+  const busy = useStore((s) => s.busy)
   const [result, setResult] = useState<Awaited<ReturnType<typeof api.discoverDb>> | null>(null)
 
   const run = async () => {
-    const values = await form.validateFields()
-    setLoading(true)
     try {
-      const r = await api.discoverDb({ ...values, apply: true })
+      const values = await form.validateFields()
+      setLoading(true)
+      const r = await useStore.getState().runExternal(() => api.discoverDb({ ...values, apply: true }), {
+        view: (result) => importView(result.report),
+      })
       setResult(r)
-      onDone()
-      message.success(`已采集 ${r.collected.tables} 张表`)
+      if (r.warnings.length) message.warning(`已采集 ${r.collected.tables} 张表，部分内容需检查提示`)
+      else message.success(`已采集 ${r.collected.tables} 张表`)
     } catch (e) {
-      message.error((e as Error).message)
+      if (e instanceof Error) message.error(e.message)
     } finally {
       setLoading(false)
     }
@@ -200,15 +219,15 @@ function DbTab({ onDone }: { onDone: () => void }) {
           <Form.Item label="密码" name="password"><Input.Password /></Form.Item>
           <Form.Item label="库名" name="database" rules={[{ required: true }]}><Input /></Form.Item>
         </Space>
-        <Button type="primary" loading={loading} onClick={() => void run()}>采集并入图</Button>
+        <Button type="primary" disabled={busy} loading={loading} onClick={() => void run()}>采集并入图</Button>
       </Form>
       {result && (
         <>
           {result.warnings.length > 0 && (
-            <Alert type="warning" showIcon message="部分内容被截断"
+            <Alert type="warning" showIcon message="部分内容未采集，已保留此前信息"
               description={result.warnings.slice(0, 5).map((w, i) => <div key={i}>{w}</div>)} />
           )}
-          <ReportView report={result.report} />
+          <ReportView report={result.report} warnings={result.warnings.length > 0} />
         </>
       )}
     </Space>
@@ -216,14 +235,13 @@ function DbTab({ onDone }: { onDone: () => void }) {
 }
 
 export function ImportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const refresh = useStore((s) => s.refresh)
   return (
     <Modal open={open} onCancel={onClose} footer={null} width={720} title="导入 / 采集数据流">
       <Tabs
         items={[
-          { key: 'excel', label: 'Excel 台账', children: <ExcelTab onDone={refresh} /> },
-          { key: 'sql', label: 'SQL 血缘', children: <SqlTab onDone={refresh} /> },
-          { key: 'db', label: '数据库采集', children: <DbTab onDone={refresh} /> },
+          { key: 'excel', label: 'Excel 台账', children: <ExcelTab /> },
+          { key: 'sql', label: 'SQL 血缘', children: <SqlTab /> },
+          { key: 'db', label: '数据库采集', children: <DbTab /> },
         ]}
       />
     </Modal>

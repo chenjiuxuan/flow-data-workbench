@@ -1,14 +1,16 @@
-"""稳定 ID 规范：不同采集来源对同一对象产出相同 id，合并时才能对上。
+"""稳定 ID：SQL/Excel 使用逻辑表身份，数据库采集使用独立的物理实例身份。
 
 - 系统类:   sys:{名称}
-- 数据库:   db:{库类型}:{主机}:{库名}
-- 表:      tbl:{库名.表名}（小写；SQL/Excel/采集三方一致）
+- 数据库:   db:{库类型}:{主机}:{端口}:{库名}
+- 逻辑表:   tbl:{库名.表名}（小写，SQL/Excel 一致）
+- 物理表:   physical-tbl:{完整数据库实例身份}:{表名}
 - 业务环节: step:{名称}
 - 流转边:   flow:{源id}->{目标id}:{内容摘要}
 - 血缘边:   lineage:{源表}->{目标表}
 - 使用边:   uses:{环节}->{系统}
 """
 import re
+from urllib.parse import quote
 
 from sqlglot import exp
 
@@ -21,8 +23,21 @@ def step_id(name: str) -> str:
     return f"step:{name.strip()}"
 
 
-def db_id(db_type: str, host: str, database: str) -> str:
-    return f"db:{db_type}:{host}:{database}".lower()
+def db_id(db_type: str, host: str, database: str, *, port: int | None = None) -> str:
+    if port is None:
+        # 兼容既有调用与备份。采集服务必须显式传端口，旧资产不会被改名/删除。
+        return f"db:{db_type}:{host}:{database}".lower()
+    parts = (db_type.strip().lower(), host.strip().lower(), str(port), database)
+    return "db:" + ":".join(quote(part, safe="") for part in parts)
+
+
+def database_source(db_type: str, host: str, port: int, database: str) -> str:
+    """完整采集来源键，同时也是本次采集数据库节点的 ID。"""
+    return db_id(db_type, host, database, port=port)
+
+
+def physical_table_id(instance_id: str, table: str) -> str:
+    return f"physical-tbl:{instance_id.removeprefix('db:')}:{quote(table, safe='')}"
 
 
 def table_id(database: str | None, table: str) -> str:

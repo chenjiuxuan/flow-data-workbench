@@ -1,9 +1,12 @@
 """REST API 路由。"""
+import hashlib
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import schemas
 from .db import get_session
@@ -11,7 +14,7 @@ from .models import EdgeRecord, NodeRecord
 from .services import db_introspect, excel_import, graph as graph_service
 from .services import sql_lineage
 from .services.demo_seed import demo_drafts
-from .services.ids import sys_id
+from .services.ids import database_source, sys_id
 from .services.merge import EdgeDraft, NodeDraft, merge_drafts
 
 router = APIRouter(prefix="/api")
@@ -39,6 +42,26 @@ def _mark_manual(provenance: dict, keys: list[str]) -> None:
     fields = set(provenance.setdefault("manual_fields", []))
     fields.update(keys)
     provenance["manual_fields"] = sorted(fields)
+
+
+def _snapshot(session: Session) -> dict:
+    """完整图的规范化快照；revision 仅由持久化内容决定。"""
+    payload = {
+        "nodes": [_node_out(n) | {"provenance": n.provenance_dict}
+                  for n in session.query(NodeRecord).order_by(NodeRecord.id).all()],
+        "edges": [_edge_out(e) | {"provenance": e.provenance_dict}
+                  for e in session.query(EdgeRecord).order_by(EdgeRecord.id).all()],
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), allow_nan=False)
+    return payload | {"revision": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+
+
+def _begin_snapshot(session: Session, *, write: bool = False) -> None:
+    # pysqlite 的 SELECT 默认不启动数据库事务。显式 BEGIN 让两次表查询共享
+    # 同一快照；IMMEDIATE 将 revision 校验和写入置于同一写锁内，防止并发覆盖。
+    if session.get_bind().dialect.name == "sqlite":
+        session.execute(text("BEGIN IMMEDIATE" if write else "BEGIN"))
 
 
 # ---------- 图查询 ----------
@@ -206,8 +229,9 @@ async def import_excel(file: UploadFile, apply: bool = True,
         node_drafts, edge_drafts, errors = excel_import.parse_excel(content)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    report = merge_drafts(session, f"excel:{file.filename}", node_drafts, edge_drafts) \
-        if apply else None
+    report = merge_drafts(session, f"excel:{file.filename}", node_drafts, edge_drafts,
+                          complete=not errors) \
+        if apply and not errors else None
     return {
         "parsed": {"nodes": len(node_drafts), "edges": len(edge_drafts)},
         "errors": errors,
@@ -228,7 +252,7 @@ def import_sql(body: schemas.SqlImportIn, session: Session = Depends(get_session
         } for e in result.edges
     ]
     report = None
-    if body.apply:
+    if body.apply and not result.errors:
         node_drafts = [NodeDraft(tid, "table", name) for tid, name in result.tables.items()]
         edge_drafts = [
             EdgeDraft(
@@ -240,8 +264,10 @@ def import_sql(body: schemas.SqlImportIn, session: Session = Depends(get_session
             )
             for e in result.edges
         ]
-        report = merge_drafts(session, f"sql:{body.source_name}", node_drafts, edge_drafts)
+        report = merge_drafts(session, f"sql:{body.source_name}", node_drafts, edge_drafts,
+                              complete=not result.errors)
     return {"tables": result.tables, "edges": edges, "errors": result.errors,
+            "warnings": result.warnings,
             "report": report.to_dict() if report else None}
 
 
@@ -254,8 +280,8 @@ def discovery_db(body: schemas.DbDiscoverIn, session: Session = Depends(get_sess
             body.db_type, body.host, body.port, body.user, body.password, body.database)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    report = merge_drafts(session, f"db:{body.db_type}:{body.host}:{body.database}",
-                          node_drafts, []) if body.apply else None
+    report = merge_drafts(session, database_source(body.db_type, body.host, body.port, body.database),
+                          node_drafts, [], complete=not warnings) if body.apply else None
     return {
         "collected": {"database": 1, "tables": len(node_drafts) - 1},
         "warnings": warnings,
@@ -274,12 +300,8 @@ def seed_demo(session: Session = Depends(get_session)):
 
 @router.get("/export/json")
 def export_json(session: Session = Depends(get_session)):
-    nodes = session.query(NodeRecord).all()
-    edges = session.query(EdgeRecord).all()
-    payload = {
-        "nodes": [_node_out(n) | {"provenance": n.provenance_dict} for n in nodes],
-        "edges": [_edge_out(e) | {"provenance": e.provenance_dict} for e in edges],
-    }
+    _begin_snapshot(session)
+    payload = _snapshot(session)
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2),
         media_type="application/json",
@@ -289,44 +311,56 @@ def export_json(session: Session = Depends(get_session)):
 
 @router.post("/import/json")
 def restore_json(body: schemas.JsonRestoreIn, session: Session = Depends(get_session)):
-    if body.mode == "replace":
-        session.query(EdgeRecord).delete()
-        session.query(NodeRecord).delete()
-        session.commit()
+    try:
+        _begin_snapshot(session, write=True)
+        current = _snapshot(session)
+        if body.expected_revision is not None and body.expected_revision != current["revision"]:
+            raise HTTPException(409, "图数据已变化，请刷新后重试；本次操作未覆盖现有数据")
 
-    def restore_items(records, cls):
-        added, updated = 0, 0
-        for item in records:
-            node_id = item.get("id") or ""
-            if not node_id:
-                continue
-            prov = item.get("provenance") or {}
-            data = dict(
-                id=node_id,
-                type=item.get("type", "system"),
-                name=item.get("name", node_id),
-                attrs=json.dumps(item.get("attrs") or {}, ensure_ascii=False),
-                origin=item.get("origin", "manual"),
-                vanished=bool(item.get("vanished", False)),
-                provenance=json.dumps(prov, ensure_ascii=False),
-            )
-            rec = session.get(cls, node_id)
-            if rec is None:
-                if cls is NodeRecord:
-                    session.add(NodeRecord(x=item.get("x", 0), y=item.get("y", 0), **data))
+        node_ids = {n.id for n in body.nodes}
+        if body.mode == "merge":
+            node_ids.update(n["id"] for n in current["nodes"])
+        for edge in body.edges:
+            if edge.source not in node_ids or edge.target not in node_ids:
+                raise HTTPException(400, f"连线 {edge.id} 引用了备份/现有图中不存在的节点")
+
+        # 在任何删除前完成类型验证和 JSON 编码，清空和重建只做一次提交。
+        def common(item):
+            return dict(id=item.id, type=item.type, origin=item.origin, vanished=item.vanished,
+                        attrs=json.dumps(item.attrs, ensure_ascii=False, allow_nan=False),
+                        provenance=json.dumps(item.provenance, ensure_ascii=False, allow_nan=False))
+
+        node_data = [common(n) | {"name": n.name, "x": n.x, "y": n.y} for n in body.nodes]
+        edge_data = [common(e) | {"source_id": e.source, "target_id": e.target, "label": e.label}
+                     for e in body.edges]
+
+        if body.mode == "replace":
+            session.query(EdgeRecord).delete(synchronize_session="fetch")
+            session.query(NodeRecord).delete(synchronize_session="fetch")
+
+        def restore_items(records, cls):
+            added, updated = 0, 0
+            for data in records:
+                rec = session.get(cls, data["id"])
+                if rec is None:
+                    session.add(cls(**data))
+                    added += 1
                 else:
-                    session.add(EdgeRecord(
-                        source_id=item.get("source", ""), target_id=item.get("target", ""),
-                        type=item.get("type", "flow"), label=item.get("label", ""), **data))
-                added += 1
-            else:
-                for key, value in data.items():
-                    setattr(rec, key, value)
-                updated += 1
-        return added, updated
+                    for key, value in data.items():
+                        setattr(rec, key, value)
+                    updated += 1
+            return added, updated
 
-    node_added, node_updated = restore_items(body.nodes, NodeRecord)
-    edge_added, edge_updated = restore_items(body.edges, EdgeRecord)
-    session.commit()
-    return {"nodesAdded": node_added, "nodesUpdated": node_updated,
-            "edgesAdded": edge_added, "edgesUpdated": edge_updated}
+        node_added, node_updated = restore_items(node_data, NodeRecord)
+        edge_added, edge_updated = restore_items(edge_data, EdgeRecord)
+        session.flush()
+        revision = _snapshot(session)["revision"]
+        session.commit()
+        return {"nodesAdded": node_added, "nodesUpdated": node_updated,
+                "edgesAdded": edge_added, "edgesUpdated": edge_updated, "revision": revision}
+    except HTTPException:
+        session.rollback()
+        raise
+    except (ValueError, TypeError, SQLAlchemyError) as exc:
+        session.rollback()
+        raise HTTPException(400, "备份恢复失败，原图已保留；请检查备份内容") from exc
