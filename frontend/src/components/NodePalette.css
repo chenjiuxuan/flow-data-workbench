@@ -1,0 +1,247 @@
+.node-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid #e7ebf0;
+  background: #fff;
+  scrollbar-width: thin;
+  scrollbar-color: #d5dce5 transparent;
+}
+
+.node-palette {
+  box-sizing: border-box;
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  padding: 20px 16px 8px;
+  color: #1e293b;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.node-palette__header {
+  padding: 0 8px 12px;
+}
+
+.node-palette__header h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.node-palette__header p {
+  margin: 5px 0 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.node-palette__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.node-palette__item {
+  display: flex;
+  min-height: 42px;
+  box-sizing: border-box;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 9px;
+  border: 1px solid #e7ebf0;
+  border-radius: 7px;
+  background: #fff;
+  cursor: grab;
+  user-select: none;
+  transition: background-color 120ms, border-color 120ms, opacity 120ms;
+}
+
+.node-palette__item:hover {
+  border-color: #c7d7ef;
+  background: #f8fafc;
+}
+
+.node-palette__item:active {
+  cursor: grabbing;
+}
+
+.node-palette__item.is-dragging {
+  border-color: #2563eb;
+  background: #eff6ff;
+  opacity: .55;
+}
+
+.node-palette__item.is-disabled {
+  border-color: #e7ebf0;
+  background: #f8fafc;
+  cursor: wait;
+  opacity: .5;
+}
+
+.node-palette__icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--node-tint);
+  color: var(--node-color);
+  font-size: 16px;
+}
+
+.node-palette__name {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.node-palette__view {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.node-palette__grip {
+  margin-left: auto;
+  color: #c0c9d5;
+  font-size: 14px;
+}
+
+.node-palette__view + .node-palette__grip {
+  margin-left: 0;
+}
+
+.node-palette__item:hover .node-palette__grip {
+  color: #64748b;
+}
+
+.node-palette__footer {
+  margin-top: auto;
+  padding: 16px 8px 0;
+}
+
+.node-palette__shortcuts {
+  padding: 12px 0 8px;
+  border-top: 1px solid #e7ebf0;
+}
+
+.node-palette__shortcuts h3 {
+  margin: 0 0 8px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .04em;
+}
+
+.node-palette__shortcuts dl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.node-palette__shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.node-palette__shortcut dd {
+  margin: 0;
+}
+
+.node-palette__shortcut kbd {
+  display: block;
+  box-sizing: border-box;
+  min-width: 48px;
+  padding: 0 6px;
+  border: 1px solid #e7ebf0;
+  border-bottom-color: #d5dce5;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #64748b;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.node-palette__guide {
+  border-top: 1px solid #e7ebf0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.node-palette__guide summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-radius: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.node-palette__guide summary::-webkit-details-marker {
+  display: none;
+}
+
+.node-palette__guide summary:hover {
+  color: #1e293b;
+}
+
+.node-palette__guide summary:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 4px;
+}
+
+.node-palette__chevron {
+  margin-left: auto;
+  font-size: 10px;
+  transition: transform 120ms;
+}
+
+.node-palette__guide[open] .node-palette__chevron {
+  transform: rotate(90deg);
+}
+
+.node-palette__guide ul {
+  margin: 0 0 4px;
+  padding-left: 18px;
+  line-height: 1.8;
+}
+
+.node-palette__guide li + li {
+  margin-top: 8px;
+}
+
+@media (max-width: 900px) {
+  .node-sidebar {
+    width: 220px;
+  }
+
+  .node-palette {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .node-palette__item {
+    gap: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node-palette__item,
+  .node-palette__chevron {
+    transition: none;
+  }
+}

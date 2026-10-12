@@ -255,10 +255,10 @@ export default function App() {
       </div>
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <div style={{ width: 220, padding: 0, borderRight: '1px solid #f0f0f0', background: '#fafafa', overflowY: 'auto' }}>
+        <aside className="node-sidebar" aria-label="节点工具栏">
           <NodePalette />
-        </div>
-        <div ref={wrapperRef} style={{ flex: 1, position: 'relative', background: '#f7f8fa' }}>
+        </aside>
+        <div ref={wrapperRef} style={{ flex: 1, minWidth: 0, position: 'relative', background: '#f7f8fa' }}>
           <FlowCanvas />
           <TraceBanner />
           {nodes.length === 0 && (
