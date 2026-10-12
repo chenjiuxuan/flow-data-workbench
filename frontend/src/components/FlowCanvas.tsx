@@ -29,8 +29,6 @@ export function FlowCanvas() {
   const select = useStore((s) => s.select)
   const canvasSelection = useStore((s) => s.canvasSelection)
   const busy = useStore((s) => s.busy)
-  const [rfNodes, setRfNodes] = useState<DataFlowNodeType[]>([])
-  const [rfEdges, setRfEdges] = useState<RfEdge[]>([])
   const [menu, setMenu] = useState<{ x: number; y: number; node: GraphNode } | null>(null)
 
   const displayNodes = useMemo(
@@ -70,6 +68,14 @@ export function FlowCanvas() {
     })),
     [edges, trace],
   )
+
+  // 返回数据图时直接带入已加载节点及选择，避免空画布的选择回调清掉资产定位。
+  const [rfNodes, setRfNodes] = useState<DataFlowNodeType[]>(() => displayNodes.map((node) => ({
+    ...node, selected: canvasSelection.nodes.includes(node.id),
+  })))
+  const [rfEdges, setRfEdges] = useState<RfEdge[]>(() => displayEdges.map((edge) => ({
+    ...edge, selected: canvasSelection.edges.includes(edge.id),
+  })))
 
   useEffect(() => {
     setRfNodes((previous) => displayNodes.map((node) => {
@@ -210,8 +216,12 @@ export function FlowCanvas() {
         panOnDrag={[1, 2]}
         selectionMode={SelectionMode.Partial}
         deleteKeyCode={['Delete', 'Backspace']}
-        onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) =>
-          useStore.getState().setCanvasSelection(selectedNodes.map((n) => n.id), selectedEdges.map((e) => e.id))}
+        onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
+          // React Flow 初始化时先报告空选择；保留受控节点上尚待同步的选择。
+          if (!selectedNodes.length && !selectedEdges.length
+            && (rfNodes.some((node) => node.selected) || rfEdges.some((edge) => edge.selected))) return
+          useStore.getState().setCanvasSelection(selectedNodes.map((n) => n.id), selectedEdges.map((e) => e.id))
+        }}
         onNodeClick={(_, node) => select({ kind: 'node', id: node.id })}
         onEdgeClick={(_, edge) => select({ kind: 'edge', id: edge.id })}
         onPaneClick={() => select(null)}

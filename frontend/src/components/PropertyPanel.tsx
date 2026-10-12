@@ -3,6 +3,7 @@ import { App as AntdApp, Button, Descriptions, Drawer, Form, Input, Popconfirm, 
 import { useEffect } from 'react'
 import { useStore } from '../store'
 import { NODE_TYPE_META, EDGE_TYPE_LABEL } from './meta'
+import { AssetProcessLinks } from '../process/AssetProcessLinks'
 
 const { Text } = Typography
 
@@ -14,7 +15,7 @@ const ATTR_FIELDS: { key: string; label: string }[] = [
   { key: 'desc', label: '描述' },
 ]
 
-export function PropertyPanel() {
+export function PropertyPanel({ onOpenProcess }: { onOpenProcess?: (id: string) => void }) {
   const { message } = AntdApp.useApp()
   const store = useStore()
   const selection = store.selection
@@ -134,6 +135,8 @@ export function PropertyPanel() {
               </>
             )}
           </Space>
+
+          {node && onOpenProcess && <AssetProcessLinks assetId={node.id} onOpenProcess={onOpenProcess} />}
 
           <Descriptions
             column={1}

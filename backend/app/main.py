@@ -11,6 +11,7 @@ from .models import NodeRecord
 from .services.demo_seed import demo_drafts
 from .services.merge import merge_drafts
 from .api import router
+from .process_api import router as process_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
@@ -32,10 +33,11 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="数据流梳理平台", lifespan=lifespan)
+app = FastAPI(title="业务流程与数据关系梳理平台", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"], allow_headers=["*"],
 )
 app.include_router(router)
+app.include_router(process_router)

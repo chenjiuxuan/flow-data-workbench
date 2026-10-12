@@ -1,0 +1,50 @@
+.workspace-shell { display: flex; flex-direction: column; height: 100dvh; min-height: 0; background: #f8fafc; color: #1e293b; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.workspace-topbar { display: flex; align-items: center; gap: 12px; flex-shrink: 0; min-height: 56px; box-sizing: border-box; padding: 8px 20px; border-bottom: 1px solid #e7ebf0; background: #fff; }
+.workspace-brand { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; white-space: nowrap; }
+.workspace-brand > .anticon { color: #2563eb; font-size: 21px; }
+.workspace-directory-trigger { color: #64748b; }
+.workspace-topbar-divider { height: 20px; border-left: 1px solid #e7ebf0; }
+.workspace-document-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.workspace-document-title > .anticon { color: #64748b; }
+.workspace-document-title h1 { margin: 0; overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-save-status { flex-shrink: 0; color: #64748b; font-size: 11px; }
+.workspace-save-status.has-error { color: #b45309; }
+.workspace-topbar-spacer { flex: 1; }
+.workspace-main { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.workspace-loading { display: grid; height: 100%; padding: 24px; box-sizing: border-box; place-items: center; }
+.workspace-directory .ant-drawer-body { padding: 20px 16px; }
+.workspace-directory-hint { margin: 0 8px 16px; color: #64748b; font-size: 12px; }
+.workspace-document-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-width: 0; padding: 12px 10px; border: 0; border-radius: 7px; background: transparent; color: #475569; cursor: pointer; font: inherit; text-align: left; }
+.workspace-document-row > .anticon { margin-top: 3px; font-size: 16px; }
+.workspace-document-row > span:last-child { min-width: 0; }
+.workspace-document-row strong { display: block; overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-document-row small { display: block; margin-top: 5px; color: #64748b; font-size: 11px; }
+.workspace-document-row:hover { background: #f8fafc; }
+.workspace-document-row.is-active { background: #eff6ff; color: #2563eb; }
+.workspace-document-row:disabled { cursor: wait; opacity: .6; }
+.workspace-document-row:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.workspace-section-heading { display: flex; align-items: center; justify-content: space-between; margin: 24px 8px 8px; padding-top: 20px; border-top: 1px solid #e7ebf0; }
+.workspace-section-heading h2 { margin: 0; color: #64748b; font-size: 12px; font-weight: 500; }
+.workspace-section-heading h2 span { margin-left: 4px; color: #94a3b8; }
+.workspace-document-list { display: flex; flex-direction: column; gap: 4px; }
+.workspace-document-list-item { display: flex; align-items: center; position: relative; }
+.workspace-document-list-item .workspace-document-row { padding-right: 38px; }
+.workspace-document-menu { position: absolute; right: 6px; }
+.workspace-empty-directory { padding: 18px 10px; color: #64748b; font-size: 12px; }
+.workspace-empty-directory p { margin: 0 0 6px; color: #475569; font-size: 13px; }
+.workspace-empty-directory span { display: block; margin-bottom: 16px; }
+.workspace-directory-import { margin: 24px 8px 0; padding-top: 20px; border-top: 1px solid #e7ebf0; }
+.workspace-directory-import p { margin: 12px 0 0; color: #64748b; font-size: 11px; line-height: 1.8; }
+.workspace-template-options { display: flex; gap: 16px; flex-wrap: wrap; }
+.asset-process-links { margin: 8px 0 24px; padding-top: 16px; border-top: 1px solid #e7ebf0; }
+.asset-process-links h3 { margin: 0 0 12px; color: #475569; font-size: 13px; font-weight: 600; }
+.asset-process-links p { color: #64748b; font-size: 12px; }
+.asset-process-links ul { display: flex; flex-direction: column; gap: 8px; padding: 0; list-style: none; }
+.asset-process-links li { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.asset-process-links li button { padding: 0; height: auto; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.asset-process-links li span { flex-shrink: 0; color: #64748b; font-size: 11px; }
+@media (max-width: 720px) {
+  .workspace-topbar { gap: 8px; padding-right: 12px; padding-left: 12px; }
+  .workspace-brand > span:last-child, .workspace-save-status, .workspace-topbar-divider { display: none; }
+  .workspace-topbar > .ant-btn-primary { padding-right: 8px; padding-left: 8px; }
+}

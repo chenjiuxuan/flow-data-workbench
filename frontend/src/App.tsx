@@ -4,7 +4,7 @@ import {
   UndoOutlined, RedoOutlined,
 } from '@ant-design/icons'
 import { App as AntdApp, Button, Divider, Segmented, Space, Tooltip, Upload } from 'antd'
-import { toPng } from 'html-to-image'
+import { toBlob } from 'html-to-image'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useReactFlow } from '@xyflow/react'
 import { api } from './api/client'
@@ -20,6 +20,7 @@ import type { ViewKey } from './types'
 
 const NODE_W = 200
 const NODE_H = 60
+let dataInitialized = false
 
 function TraceBanner() {
   const trace = useStore((s) => s.trace)
@@ -41,7 +42,7 @@ function TraceBanner() {
   )
 }
 
-export default function App() {
+export default function App({ onOpenProcess }: { onOpenProcess?: (id: string) => void }) {
   const { message } = AntdApp.useApp()
   const { fitView } = useReactFlow()
   const view = useStore((s) => s.view)
@@ -101,7 +102,11 @@ export default function App() {
   const onLayoutClick = useCallback(() => void relayoutAll(), [relayoutAll])
 
   useEffect(() => {
-    void initialize().catch((error: Error) => message.error(`加载失败：${error.message}`))
+    const load = dataInitialized ? useStore.getState().refresh : async () => {
+      await initialize()
+      dataInitialized = true
+    }
+    void load().catch((error: Error) => message.error(`加载失败：${error.message}`))
   }, [initialize, message])
 
   // 等新视图数据真正到达后再适配；导入的新节点也会进入视野。
@@ -162,7 +167,7 @@ export default function App() {
     const width = Math.max(1, Math.ceil(boundsW * scale))
     const height = Math.max(1, Math.ceil(boundsH * scale))
     try {
-      const dataUrl = await toPng(viewportEl, {
+      const blob = await toBlob(viewportEl, {
         backgroundColor: '#f7f8fa',
         pixelRatio: 2,
         width,
@@ -173,10 +178,13 @@ export default function App() {
           transform: `translate(${-minX * scale}px, ${-minY * scale}px) scale(${scale})`,
         },
       })
+      if (!blob) throw new Error('未能生成图片，请重试')
+      const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.download = `数据流图-${view}-${new Date().toISOString().slice(0, 10)}.png`
-      link.href = dataUrl
+      link.href = url
       link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
       message.success('已导出 PNG')
     } catch (e) {
       message.error(`导出失败：${(e as Error).message}`)
@@ -184,16 +192,15 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#fafafa' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#fafafa' }}>
       {/* 顶栏 */}
       <div
         style={{
-          display: 'flex', alignItems: 'center', gap: 12, padding: '10px 20px',
+          display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', flexShrink: 0,
           borderBottom: '1px solid #f0f0f0', background: '#fff', flexWrap: 'wrap',
           boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
         }}
       >
-        <div style={{ fontWeight: 700, fontSize: 16, color: '#1677ff' }}> 数据流梳理平台</div>
         <Segmented
           value={view}
           onChange={(v) => void setView(v as ViewKey).catch((error: Error) => message.error(`视图加载失败：${error.message}`))}
@@ -203,7 +210,7 @@ export default function App() {
             { value: 'field', label: '字段视图' },
           ]}
         />
-        <span style={{ fontSize: 12, color: '#999', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span title={VIEW_TITLE[view]} style={{ fontSize: 11, color: '#64748b', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {VIEW_TITLE[view]}
         </span>
         <div style={{ flex: 1 }} />
@@ -282,7 +289,7 @@ export default function App() {
         </div>
       </div>
 
-      <PropertyPanel />
+      <PropertyPanel onOpenProcess={onOpenProcess} />
       <ImportModal open={importOpen} onClose={() => setImportOpen(false)} />
       {loading && (
         <div style={{ position: 'fixed', top: 4, right: 8, fontSize: 12, color: '#999' }}>加载中…</div>

@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, Float, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -108,3 +109,16 @@ class EdgeRecord(Base):
     @property
     def provenance_dict(self) -> dict:
         return _json_dict(self, "provenance")
+
+
+class ProcessDiagramRecord(Base):
+    """独立流程文档：图中步骤、顺序边和排版不进入共享数据资产图。"""
+
+    __tablename__ = "process_diagrams"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text, default='{"nodes":[],"edges":[]}')
+    revision: Mapped[str] = mapped_column(String(64), default=lambda: uuid4().hex)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_now, onupdate=_now)
