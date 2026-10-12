@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+backend/.venv/
+
+# 数据库与上传产物
+backend/data/
+
+# 前端
+node_modules/
+frontend/dist/
+
+# 环境与编辑器
+.env
+.DS_Store
+
+# 已有工作区规则
+.zcodeignore
