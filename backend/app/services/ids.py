@@ -9,6 +9,8 @@
 - 血缘边:   lineage:{源表}->{目标表}
 - 使用边:   uses:{环节}->{系统}
 """
+import hashlib
+import json
 import re
 from urllib.parse import quote
 
@@ -52,8 +54,16 @@ def sqlglot_table_id(table: exp.Table) -> str:
 
 
 def flow_id(source_id: str, target_id: str, content: str) -> str:
+    # 自动台账保留既有身份格式，避免重导入时重建历史边。
     digest = re.sub(r"\s+", "", content.strip().lower())[:80] or "-"
     return f"flow:{source_id}->{target_id}:{digest}"
+
+
+def manual_flow_id(source_id: str, target_id: str, label: str, edge_type: str) -> str:
+    """人工 API 的默认 ID：完整元组哈希，避免分隔符碰撞、长 ID 和 URL 特殊字符。"""
+    identity = json.dumps([source_id, target_id, label, edge_type], ensure_ascii=False,
+                          separators=(",", ":"))
+    return "flow:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def lineage_id(source_tbl_id: str, target_tbl_id: str) -> str:

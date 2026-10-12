@@ -15,6 +15,7 @@ import { PropertyPanel } from './components/PropertyPanel'
 import { VIEW_TITLE } from './components/meta'
 import { useStore } from './store'
 import { autoLayout } from './utils/layout'
+import { nodeBounds } from './utils/bounds'
 import type { ViewKey } from './types'
 
 const NODE_W = 200
@@ -152,12 +153,11 @@ export default function App() {
     const viewportEl = wrapperRef.current?.querySelector('.react-flow__viewport') as HTMLElement | null
     if (!viewportEl || nodes.length === 0) return
     // 按节点实际范围计算导出画布，覆盖视口的平移缩放，避免导出被裁切
-    const xs = nodes.map((n) => n.x)
-    const ys = nodes.map((n) => n.y)
-    const minX = Math.min(...xs) - 40
-    const minY = Math.min(...ys) - 40
-    const boundsW = Math.max(...xs) - Math.min(...xs) + NODE_W + 80
-    const boundsH = Math.max(...ys) - Math.min(...ys) + NODE_H + 80
+    const bounds = nodeBounds(nodes)!
+    const minX = bounds.minX - 40
+    const minY = bounds.minY - 40
+    const boundsW = bounds.maxX - bounds.minX + NODE_W + 80
+    const boundsH = bounds.maxY - bounds.minY + NODE_H + 80
     const scale = Math.min(2, Math.max(0.4, 1600 / boundsW))
     const width = Math.max(1, Math.ceil(boundsW * scale))
     const height = Math.max(1, Math.ceil(boundsH * scale))

@@ -5,6 +5,8 @@ import { createServer } from 'vite'
 
 const vite = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' })
 const { createGraphStore } = await vite.ssrLoadModule('/src/store.ts')
+const { nodeBounds } = await vite.ssrLoadModule('/src/utils/bounds.ts')
+const { portForDatabaseChange } = await vite.ssrLoadModule('/src/utils/database.ts')
 const originalFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = originalFetch })
 after(async () => { await vite.close() })
@@ -309,4 +311,23 @@ test('清除追溯与切视图后，迟到的 trace 响应不能重新出现', a
   finishTrace(response(server.snapshot()))
   await trace
   assert.equal(store.getState().trace, null)
+})
+
+test('切换数据库类型更新缺省端口，往返切换仍使用当前类型缺省值', () => {
+  const postgresPort = portForDatabaseChange('mysql', 'postgresql', 3306)
+  assert.equal(postgresPort, 5432)
+  assert.equal(portForDatabaseChange('postgresql', 'mysql', postgresPort), 3306)
+  assert.equal(portForDatabaseChange('mysql', 'postgresql', null), 5432)
+  assert.equal(portForDatabaseChange('postgresql', 'mysql', undefined), 3306)
+})
+
+test('切换数据库类型保留非缺省的自定义端口', () => {
+  assert.equal(portForDatabaseChange('mysql', 'postgresql', 13306), 13306)
+  assert.equal(portForDatabaseChange('postgresql', 'mysql', 15432), 15432)
+})
+
+test('大图边界迭代处理，负坐标与极值准确且不超过函数参数上限', () => {
+  const nodes = Array.from({ length: 250_000 }, (_, i) => ({ x: i - 100_000, y: 0 - i }))
+  assert.deepEqual(nodeBounds(nodes), { minX: -100_000, minY: -249_999, maxX: 149_999, maxY: 0 })
+  assert.equal(nodeBounds([]), null)
 })

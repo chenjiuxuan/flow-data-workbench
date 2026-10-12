@@ -2,6 +2,7 @@
 import { create } from 'zustand'
 import { api } from './api/client'
 import { autoLayout } from './utils/layout'
+import { nodeBounds } from './utils/bounds'
 import type { GraphBackup, GraphData, GraphEdge, GraphNode, ViewKey } from './types'
 
 export interface Selection {
@@ -122,7 +123,7 @@ function arrangeUnpositioned(backup: GraphBackup): GraphBackup {
       const positions = autoLayout({ nodeIds: [...ids], edges: next.edges.filter((e) => ids.has(e.source) && ids.has(e.target)) })
       for (const node of nodes) Object.assign(node, positions[node.id])
     } else {
-      const maxX = Math.max(...nodes.map((n) => n.x))
+      const maxX = nodeBounds(nodes)!.maxX
       piled.forEach((node, i) => { node.x = maxX + 320; node.y = 80 + i * 110 })
     }
   }

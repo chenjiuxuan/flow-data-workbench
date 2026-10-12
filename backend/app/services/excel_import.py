@@ -9,6 +9,8 @@
 """
 import io
 import re
+from zipfile import BadZipFile, ZipFile
+from xml.etree.ElementTree import ParseError as XMLParseError
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
@@ -22,6 +24,9 @@ HEADERS = ["源系统", "源系统类型(系统/外部方)", "目标系统", "�
            "字段映射(源字段->目标字段,逗号分隔)", "频率(实时/小时/日/月)", "负责人", "备注"]
 
 _TABLE_PATTERN = re.compile(r"^[A-Za-z\u4e00-\u9fa5_][\w\u4e00-\u9fa5]*\.[A-Za-z_][\w]*$")
+MAX_EXCEL_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_EXCEL_ZIP_ENTRIES = 2048
+MAX_EXCEL_ROWS = 100000
 
 
 def build_template() -> bytes:
@@ -49,12 +54,30 @@ def _cell_str(value) -> str:
 
 def parse_excel(content: bytes) -> tuple[list[NodeDraft], list[EdgeDraft], list[str]]:
     """返回 (节点草稿, 边草稿, 错误列表)。"""
-    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    try:
+        with ZipFile(io.BytesIO(content)) as archive:
+            entries = archive.infolist()
+            if (len(entries) > MAX_EXCEL_ZIP_ENTRIES or
+                    sum(entry.file_size for entry in entries) > MAX_EXCEL_EXPANDED_BYTES):
+                raise ValueError("Excel 解压后过大或包含过多文件，最大支持 64 MiB / 2048 个条目")
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except (BadZipFile, KeyError, OSError, XMLParseError, RuntimeError) as exc:
+        raise ValueError("无效或损坏的 Excel 文件，请使用下载的模板") from exc
     try:
         if TEMPLATE_SHEET not in wb.sheetnames:
             raise ValueError(f"缺少工作表「{TEMPLATE_SHEET}」，请使用下载的模板填写")
         ws = wb[TEMPLATE_SHEET]
-        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        # 部分生成工具会低报/夸大 dimension；否则 read_only 可能漏掉所有真实行，
+        # 把正常台账误判成空快照。按 XML 实际内容读取并应用自己的行数限制。
+        ws.reset_dimensions()
+        rows = []
+        # 只读取模板所需列，且不信任工作表中可能被夸大的行/列维度。
+        for row in ws.iter_rows(min_row=2, max_col=len(HEADERS), values_only=True):
+            if len(rows) >= MAX_EXCEL_ROWS:
+                raise ValueError("Excel 超过最大支持的 100000 行，请拆分导入")
+            rows.append(row)
+    except (BadZipFile, OSError, XMLParseError, RuntimeError) as exc:
+        raise ValueError("无效或损坏的 Excel 文件，请使用下载的模板") from exc
     finally:
         wb.close()
 

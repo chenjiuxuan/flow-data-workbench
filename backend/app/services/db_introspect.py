@@ -3,8 +3,12 @@
 返回 (节点草稿, 警告列表)。出现警告意味着快照不完整，调用方应使用
 merge_drafts(..., complete=False)，避免因限额或反射失败错误地停用资产。
 """
+import logging
+
 from .ids import database_source, physical_table_id, table_id
 from .merge import NodeDraft
+
+logger = logging.getLogger(__name__)
 
 MAX_TABLES = 2000
 MAX_COLUMNS_PER_TABLE = 60
@@ -19,6 +23,7 @@ def discover_database(db_type: str, host: str, port: int, user: str, password: s
                       database: str) -> tuple[list[NodeDraft], list[str]]:
     """返回物理库/表草稿；字段失败时省略 columns，以保留先前成功的字段。"""
     if db_type not in DB_TYPES:
+        logger.warning("Database discovery rejected reason=unsupported_database_type")
         raise ValueError(f"不支持的数据库类型：{db_type}（可选 mysql / postgresql）")
     from sqlalchemy import create_engine, inspect
     from sqlalchemy.engine import URL
@@ -28,11 +33,16 @@ def discover_database(db_type: str, host: str, port: int, user: str, password: s
     instance_id = database_source(db_type, host, port, database)
     warnings: list[str] = []
     engine = None
+    phase = "engine_creation"
     try:
         engine = create_engine(url, connect_args={"connect_timeout": 8})
+        phase = "connection"
         inspector = inspect(engine)
+        phase = "table_reflection"
         tables = sorted(inspector.get_table_names())
         if len(tables) > MAX_TABLES:
+            logger.warning("Database discovery incomplete db_type=%s reason=table_limit "
+                           "tables=%d limit=%d", db_type, len(tables), MAX_TABLES)
             tables = tables[:MAX_TABLES]
             warnings.append(f"表数量超过 {MAX_TABLES}，只采集前 {MAX_TABLES} 张；保留未采集资产")
 
@@ -40,13 +50,16 @@ def discover_database(db_type: str, host: str, port: int, user: str, password: s
             NodeDraft(instance_id, "database", f"{database}@{host}:{port}",
                       attrs={"db_type": db_type, "host": host, "port": port, "database": database}),
         ]
-        for table in tables:
+        phase = "column_reflection"
+        for index, table in enumerate(tables, 1):
             attrs = {"database": database, "table": table, "host": host, "port": port,
                      "db_type": db_type, "instance_id": instance_id,
                      "logical_table": table_id(database, table)}
             try:
                 columns = inspector.get_columns(table)
-            except Exception:  # noqa: BLE001 单表失败不阻断，更不能把失败当成空字段
+            except Exception as error:  # noqa: BLE001 单表失败不阻断，更不能把失败当成空字段
+                logger.warning("Database discovery incomplete db_type=%s reason=column_reflection "
+                               "table_index=%d error_type=%s", db_type, index, type(error).__name__)
                 warnings.append(f"表 {table} 的字段读取失败，已保留上次字段信息")
             else:
                 attrs["columns"] = [
@@ -54,12 +67,21 @@ def discover_database(db_type: str, host: str, port: int, user: str, password: s
                     for c in columns[:MAX_COLUMNS_PER_TABLE]
                 ]
                 if len(columns) > MAX_COLUMNS_PER_TABLE:
+                    logger.warning("Database discovery incomplete db_type=%s reason=column_limit "
+                                   "table_index=%d columns=%d limit=%d", db_type, index,
+                                   len(columns), MAX_COLUMNS_PER_TABLE)
                     warnings.append(f"表 {table} 字段超过 {MAX_COLUMNS_PER_TABLE} 个，只保留前 {MAX_COLUMNS_PER_TABLE} 个")
             nodes.append(NodeDraft(physical_table_id(instance_id, table), "table",
                                    f"{database}.{table}@{host}:{port}", attrs=attrs))
+        logger.info("Database discovery completed db_type=%s tables=%d warnings=%d",
+                    db_type, len(tables), len(warnings))
         return nodes, warnings
     except Exception as e:  # noqa: BLE001 连接/表列表反射错误统一由 API 转为 400
-        raise ValueError(f"连接失败：{e}") from e
+        logger.warning("Database discovery failed db_type=%s phase=%s error_type=%s",
+                       db_type, phase, type(e).__name__)
+        # 驱动异常正文可能携带 DSN 或密码；客户端与日志均只保留异常类型。
+        raise ValueError("连接失败：请检查主机、端口、账号权限及数据库名称"
+                         f"（{type(e).__name__}）") from e
     finally:
         if engine is not None:
             engine.dispose()

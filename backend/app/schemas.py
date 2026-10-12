@@ -1,12 +1,15 @@
 """API 请求/响应模型。"""
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+NodeType = Literal["system", "database", "api", "file", "external", "process_step", "table"]
+EdgeType = Literal["flow", "lineage", "uses"]
 
 
 class NodeIn(BaseModel):
     id: str | None = Field(None, description="不传则按名称自动生成")
-    type: str
+    type: NodeType
     name: str
     attrs: dict = {}
     x: float = 0
@@ -14,6 +17,8 @@ class NodeIn(BaseModel):
 
 
 class NodePatch(BaseModel):
+    # 类型由创建/自动来源定义，人工 PATCH 不改类型；未知字段不能静默忽略。
+    model_config = ConfigDict(extra="forbid")
     name: str | None = None
     attrs: dict | None = None
     x: float | None = None
@@ -26,12 +31,13 @@ class EdgeIn(BaseModel):
     id: str | None = None
     source_id: str
     target_id: str
-    type: str = "flow"
+    type: EdgeType = "flow"
     label: str = ""
     attrs: dict = {}
 
 
 class EdgePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     label: str | None = None
     attrs: dict | None = None
     manual: bool = True
@@ -49,18 +55,24 @@ class SqlImportIn(BaseModel):
 
 
 class DbDiscoverIn(BaseModel):
-    db_type: str = "mysql"
+    db_type: Literal["mysql", "postgresql"] = "mysql"
     host: str
-    port: int = 3306
+    port: int = Field(3306, ge=1, le=65535)
     user: str
     password: str = ""
     database: str
     apply: bool = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def default_port_for_type(cls, value):
+        if isinstance(value, dict) and "port" not in value:
+            return {**value, "port": 5432 if value.get("db_type") == "postgresql" else 3306}
+        return value
+
 
 class BackupItem(BaseModel):
     id: str = Field(min_length=1)
-    type: str = Field(min_length=1)
     attrs: dict = Field(default_factory=dict)
     origin: Literal["auto", "manual"] = "manual"
     vanished: bool = Field(False, strict=True)
@@ -91,6 +103,7 @@ class BackupItem(BaseModel):
 
 
 class BackupNode(BackupItem):
+    type: NodeType
     name: str = Field(min_length=1)
     x: float = Field(0, allow_inf_nan=False)
     y: float = Field(0, allow_inf_nan=False)
@@ -99,7 +112,7 @@ class BackupNode(BackupItem):
 class BackupEdge(BackupItem):
     source: str = Field(min_length=1)
     target: str = Field(min_length=1)
-    type: str = "flow"
+    type: EdgeType = "flow"
     label: str = ""
 
 

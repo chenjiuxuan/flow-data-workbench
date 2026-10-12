@@ -1,12 +1,13 @@
 /** 导入与采集对话框：Excel 台账 / SQL 血缘 / 数据库采集 三个入口。 */
 import { DownloadOutlined, DatabaseOutlined, FileExcelOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import {
-  Alert, App as AntdApp, Button, Form, Input, Modal, Select, Space, Table, Tabs, Typography, Upload,
+  Alert, App as AntdApp, Button, Form, Input, InputNumber, Modal, Select, Space, Table, Tabs, Typography, Upload,
 } from 'antd'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { api } from '../api/client'
 import { useStore } from '../store'
 import type { MergeReport, ViewKey } from '../types'
+import { DEFAULT_DATABASE_PORT, portForDatabaseChange, type DatabaseType } from '../utils/database'
 
 const { Text } = Typography
 const { TextArea } = Input
@@ -183,6 +184,7 @@ function SqlTab() {
 function DbTab() {
   const { message } = AntdApp.useApp()
   const [form] = Form.useForm()
+  const previousDbType = useRef<DatabaseType>('mysql')
   const [loading, setLoading] = useState(false)
   const busy = useStore((s) => s.busy)
   const [result, setResult] = useState<Awaited<ReturnType<typeof api.discoverDb>> | null>(null)
@@ -208,13 +210,23 @@ function DbTab() {
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <Alert type="info" showIcon icon={<DatabaseOutlined />}
         message="只读采集" description="仅读取库表结构（information_schema 级别），不会改动数据库。" />
-      <Form form={form} layout="vertical" initialValues={{ db_type: 'mysql', port: 3306 }} size="small">
+      <Form form={form} layout="vertical" initialValues={{ db_type: 'mysql', port: DEFAULT_DATABASE_PORT.mysql }} size="small"
+        onValuesChange={(changed, values) => {
+          if (changed.db_type) {
+            const next = changed.db_type as DatabaseType
+            form.setFieldValue('port', portForDatabaseChange(previousDbType.current, next, values.port))
+            previousDbType.current = next
+          }
+        }}>
         <Space wrap>
           <Form.Item label="类型" name="db_type" style={{ minWidth: 120 }}>
             <Select options={[{ value: 'mysql', label: 'MySQL' }, { value: 'postgresql', label: 'PostgreSQL' }]} />
           </Form.Item>
           <Form.Item label="主机" name="host" rules={[{ required: true }]}><Input placeholder="127.0.0.1" /></Form.Item>
-          <Form.Item label="端口" name="port" rules={[{ required: true }]}><Input type="number" /></Form.Item>
+          <Form.Item label="端口" name="port" rules={[
+            { required: true, message: '请填写端口' },
+            { type: 'number', min: 1, max: 65535, message: '端口应为 1–65535 的整数' },
+          ]}><InputNumber min={1} max={65535} precision={0} /></Form.Item>
           <Form.Item label="用户" name="user" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item label="密码" name="password"><Input.Password /></Form.Item>
           <Form.Item label="库名" name="database" rules={[{ required: true }]}><Input /></Form.Item>

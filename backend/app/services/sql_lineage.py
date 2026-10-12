@@ -3,6 +3,7 @@
 没有元数据时只推导能确定的字段来源；未知的星号保留表级血缘，
 歧义字段和解析失败会记录 errors，让调用方将结果视为部分快照。
 """
+import logging
 from dataclasses import dataclass, field
 
 import sqlglot
@@ -16,6 +17,28 @@ from sqlglot.optimizer.scope import Scope, build_scope, find_all_in_scope
 from sqlglot.tokens import TokenType
 
 DIALECTS = ["mysql", "postgresql", "oracle", "hive", "spark", "duckdb", "sqlite", "tsql"]
+logger = logging.getLogger(__name__)
+
+
+class _SqlglotLogRedactor(logging.Filter):
+    """sqlglot 的 fallback 警告包含 SQL 片段；服务日志统一去掉正文。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = "SQL parser diagnostic (SQL text omitted)"
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
+logging.getLogger("sqlglot").addFilter(_SqlglotLogRedactor())
+
+
+def _log_result(result: "LineageResult", statement_count: int) -> None:
+    log = logger.warning if result.errors or result.warnings else logger.info
+    log("SQL lineage analyzed statements=%d tables=%d edges=%d errors=%d warnings=%d",
+        statement_count, len(result.tables), len(result.edges), len(result.errors),
+        len(result.warnings))
 
 
 @dataclass
@@ -357,6 +380,9 @@ def analyze_sql(sql_text: str, dialect: str = "mysql") -> LineageResult:
         tokens = parser_dialect.tokenize(sql_text)
     except (SqlglotError, ValueError) as error:
         result.errors.append(f"SQL 方言或词法解析失败：{error}")
+        logger.warning("SQL lineage rejected phase=tokenization error_type=%s",
+                       type(error).__name__)
+        _log_result(result, 0)
         return result
 
     # 使用方言 tokenizer 分隔语句，不会拆开字符串/注释里的分号。
@@ -376,6 +402,8 @@ def analyze_sql(sql_text: str, dialect: str = "mysql") -> LineageResult:
             statement = sqlglot.parse(chunk, dialect=dialect)[0]
         except (SqlglotError, ValueError) as error:
             result.errors.append(f"{prefix}解析失败：{error}")
+            logger.warning("SQL lineage rejected phase=parsing statement_index=%d error_type=%s",
+                           index, type(error).__name__)
             continue
         if statement is None:
             continue
@@ -394,6 +422,8 @@ def analyze_sql(sql_text: str, dialect: str = "mysql") -> LineageResult:
             sources = _physical_sources(scope) if scope else {}
         except (SqlglotError, ValueError, RecursionError) as error:
             result.errors.append(f"{prefix}来源作用域解析失败：{error}")
+            logger.warning("SQL lineage rejected phase=source_resolution statement_index=%d "
+                           "error_type=%s", index, type(error).__name__)
             continue
         mappings: dict[str, list[str]] = {}
         if not isinstance(statement, exp.Merge):
@@ -401,6 +431,8 @@ def analyze_sql(sql_text: str, dialect: str = "mysql") -> LineageResult:
                 mappings = _field_mappings(query, targets, dialect, result, prefix)
             except (SqlglotError, ValueError, RecursionError) as error:
                 result.errors.append(f"{prefix}字段血缘解析失败：{error}")
+                logger.warning("SQL lineage rejected phase=field_resolution statement_index=%d "
+                               "error_type=%s", index, type(error).__name__)
         summary = f"{statement.key.upper()}: {chunk.strip()[:120]}"
         for source_key, source_name in sources.items():
             if source_key == target_name.lower():
@@ -409,4 +441,5 @@ def analyze_sql(sql_text: str, dialect: str = "mysql") -> LineageResult:
             result.add_table(source_id, source_name)
             result.add_edge(source_id, target_id, source_name, target_name,
                             mappings.get(source_key, []), summary)
+    _log_result(result, sum(bool(chunk.strip()) for chunk in chunks))
     return result

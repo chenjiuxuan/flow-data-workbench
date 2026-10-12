@@ -1,6 +1,7 @@
 """REST API 路由。"""
 import hashlib
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -14,10 +15,22 @@ from .models import EdgeRecord, NodeRecord
 from .services import db_introspect, excel_import, graph as graph_service
 from .services import sql_lineage
 from .services.demo_seed import demo_drafts
-from .services.ids import database_source, sys_id
+from .services.ids import database_source, manual_flow_id, sys_id
 from .services.merge import EdgeDraft, NodeDraft, merge_drafts
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
+MAX_EXCEL_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+@router.get("/health")
+def health(session: Session = Depends(get_session)):
+    try:
+        session.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        logger.warning("health database unavailable error_type=%s", type(exc).__name__)
+        raise HTTPException(503, "数据库暂不可用") from exc
+    return {"status": "ok", "database": "ok"}
 
 
 def _node_out(rec: NodeRecord) -> dict:
@@ -146,7 +159,7 @@ def delete_node(node_id: str, session: Session = Depends(get_session)):
 def create_edge(body: schemas.EdgeIn, session: Session = Depends(get_session)):
     if not session.get(NodeRecord, body.source_id) or not session.get(NodeRecord, body.target_id):
         raise HTTPException(404, "边的端点节点不存在，请先创建节点")
-    edge_id = body.id or f"flow:{body.source_id}->{body.target_id}:{body.label or body.type}"
+    edge_id = body.id or manual_flow_id(body.source_id, body.target_id, body.label, body.type)
     if session.get(EdgeRecord, edge_id):
         raise HTTPException(409, f"连线已存在：{edge_id}")
     rec = EdgeRecord(id=edge_id, source_id=body.source_id, target_id=body.target_id,
@@ -224,11 +237,26 @@ def excel_template():
 @router.post("/import/excel")
 async def import_excel(file: UploadFile, apply: bool = True,
                        session: Session = Depends(get_session)):
-    content = await file.read()
+    # UploadFile 已由框架落临时文件；此处限量分块读取，不能把整个大文件加载到内存。
+    chunks = bytearray()
     try:
-        node_drafts, edge_drafts, errors = excel_import.parse_excel(content)
+        if file.size is not None and file.size > MAX_EXCEL_UPLOAD_BYTES:
+            logger.warning("excel upload rejected reason=size_limit")
+            raise HTTPException(413, "Excel 文件过大，最大支持 10 MiB")
+        while chunk := await file.read(min(1024 * 1024, MAX_EXCEL_UPLOAD_BYTES + 1 - len(chunks))):
+            chunks.extend(chunk)
+            if len(chunks) > MAX_EXCEL_UPLOAD_BYTES:
+                logger.warning("excel upload rejected reason=size_limit")
+                raise HTTPException(413, "Excel 文件过大，最大支持 10 MiB")
+    finally:
+        await file.close()
+    try:
+        node_drafts, edge_drafts, errors = excel_import.parse_excel(bytes(chunks))
     except ValueError as e:
+        logger.warning("excel import rejected error_type=%s", type(e).__name__)
         raise HTTPException(400, str(e)) from e
+    if errors:
+        logger.warning("excel validation failed errors=%d apply=%s", len(errors), apply)
     report = merge_drafts(session, f"excel:{file.filename}", node_drafts, edge_drafts,
                           complete=not errors) \
         if apply and not errors else None
@@ -356,11 +384,16 @@ def restore_json(body: schemas.JsonRestoreIn, session: Session = Depends(get_ses
         session.flush()
         revision = _snapshot(session)["revision"]
         session.commit()
+        logger.info("backup restore completed mode=%s nodes_added=%d nodes_updated=%d "
+                    "edges_added=%d edges_updated=%d", body.mode, node_added, node_updated,
+                    edge_added, edge_updated)
         return {"nodesAdded": node_added, "nodesUpdated": node_updated,
                 "edgesAdded": edge_added, "edgesUpdated": edge_updated, "revision": revision}
-    except HTTPException:
+    except HTTPException as exc:
         session.rollback()
+        logger.warning("backup restore rejected status=%d", exc.status_code)
         raise
     except (ValueError, TypeError, SQLAlchemyError) as exc:
         session.rollback()
+        logger.warning("backup restore rolled back error_type=%s", type(exc).__name__)
         raise HTTPException(400, "备份恢复失败，原图已保留；请检查备份内容") from exc

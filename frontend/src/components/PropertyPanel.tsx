@@ -20,31 +20,30 @@ export function PropertyPanel() {
   const selection = store.selection
   const node = store.selectedNode()
   const edge = store.selectedEdge()
+  const select = useStore((s) => s.select)
   const [form] = Form.useForm()
+  const target = node ?? edge
+  const targetId = target?.id
+  const targetKind = selection?.kind
+  const name = node?.name ?? edge?.label ?? ''
+  const type = target?.type ?? 'flow'
+  const owner = String(target?.attrs.owner ?? '')
+  const method = String(target?.attrs.method ?? '')
+  const frequency = String(target?.attrs.frequency ?? '')
+  const content = String(target?.attrs.content ?? '')
+  const desc = String(target?.attrs.desc ?? '')
 
+  // 仅选中项或已保存字段变化时同步，busy/追溯/同内容刷新不会覆盖未保存输入。
   useEffect(() => {
-    const target = node ?? edge
-    if (target) {
-      form.setFieldsValue({
-        name: node?.name ?? edge?.label ?? '',
-        type: node?.type ?? edge?.type ?? 'flow',
-        owner: String(node?.attrs?.owner ?? edge?.attrs?.owner ?? ''),
-        method: String(node?.attrs?.method ?? edge?.attrs?.method ?? ''),
-        frequency: String(node?.attrs?.frequency ?? edge?.attrs?.frequency ?? ''),
-        content: String(node?.attrs?.content ?? edge?.attrs?.content ?? ''),
-        desc: String(node?.attrs?.desc ?? edge?.attrs?.desc ?? ''),
-      })
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, node, edge])
+    if (targetId) form.setFieldsValue({ name, type, owner, method, frequency, content, desc })
+  }, [form, targetId, targetKind, name, type, owner, method, frequency, content, desc])
 
   // 选中项已被删除时（如导入冲突、别处删除），自动关闭抽屉
   useEffect(() => {
-    if (selection && !node && !edge) store.select(null)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, node, edge])
+    if (selection && !targetId) select(null)
+  }, [selection, targetId, select])
 
-  const close = () => store.select(null)
+  const close = () => select(null)
 
   const save = async () => {
     try {
@@ -85,7 +84,6 @@ export function PropertyPanel() {
     catch (error) { message.error(`追溯失败：${(error as Error).message}`) }
   }
 
-  const target = node ?? edge
   const isNode = !!node
   const extra: Record<string, unknown> | undefined = target?.attrs
 

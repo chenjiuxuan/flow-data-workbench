@@ -9,12 +9,16 @@
 - 人工新建（origin=manual）的项合并完全不碰。
 """
 import json
+import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..models import EdgeRecord, NodeRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -91,7 +95,7 @@ def merge_drafts(session: Session, source: str, node_drafts: list[NodeDraft],
                  edge_drafts: list[EdgeDraft], *, complete: bool = True) -> MergeReport:
     """合并已确认的内容；complete=False 表示失败或部分采集，不做缺失判定。"""
     report = MergeReport(source=source)
-    now_iso = datetime.now().isoformat(timespec="seconds")
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     draft_node_ids = {d.id for d in node_drafts}
     draft_edge_ids = {d.id for d in edge_drafts}
 
@@ -190,5 +194,16 @@ def merge_drafts(session: Session, source: str, node_drafts: list[NodeDraft],
         _mark_missing(session, EdgeRecord, source, draft_edge_ids, now_iso,
                       report.vanished_edges, report.updated_edges)
 
-    session.commit()
+    try:
+        session.commit()
+    except SQLAlchemyError as error:
+        # 不打印异常正文：驱动错误可能包含 SQL、参数或连接信息。
+        logger.error("Graph merge commit failed error_type=%s nodes=%d edges=%d complete=%s",
+                     type(error).__name__, len(node_drafts), len(edge_drafts), complete)
+        raise
+    logger.info("Graph merge completed nodes_added=%d nodes_updated=%d edges_added=%d "
+                "edges_updated=%d nodes_vanished=%d edges_vanished=%d protected=%d complete=%s",
+                len(report.added_nodes), len(report.updated_nodes), len(report.added_edges),
+                len(report.updated_edges), len(report.vanished_nodes), len(report.vanished_edges),
+                len(report.protected_fields), complete)
     return report

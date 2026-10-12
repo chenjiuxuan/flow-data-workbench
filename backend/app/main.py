@@ -1,5 +1,6 @@
 """FastAPI 入口：uvicorn app.main:app --port 8000"""
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,8 @@ from .models import NodeRecord
 from .services.demo_seed import demo_drafts
 from .services.merge import merge_drafts
 from .api import router
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
 def seed_if_empty() -> None:
