@@ -207,9 +207,18 @@ def _stats(llm, *, calls: int, repaired: bool) -> dict:
         ("promptTokens", "prompt_tokens"),
         ("completionTokens", "completion_tokens"),
         ("reasoningTokens", "reasoning_tokens"),
+        ("firstTokenMs", "first_token_ms"),
+        ("totalMs", "total_ms"),
+        ("stalled", "stalled"),
+        ("retried", "retried"),
+        ("retrySucceeded", "retry_succeeded"),
+        ("streamAttempts", "stream_attempts"),
+        ("stallCount", "stall_count"),
+        ("retryCount", "retry_count"),
+        ("retrySuccessCount", "retry_success_count"),
     ):
         value = getattr(llm, attr, None)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, bool) or (isinstance(value, int) and value is not None):
             stats[key] = value
     return stats
 
