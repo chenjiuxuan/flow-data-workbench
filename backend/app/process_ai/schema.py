@@ -116,11 +116,24 @@ class DraftStatsOut(GenModel):
     promptTokens: int | None = None
     completionTokens: int | None = None
     reasoningTokens: int | None = None
+    firstTokenMs: int | None = None
+    totalMs: int | None = None
+    stalled: bool | None = None
+    retried: bool | None = None
+    retrySucceeded: bool | None = None
+    streamAttempts: int | None = None
+    stallCount: int | None = None
+    retryCount: int | None = None
+    retrySuccessCount: int | None = None
 
     @model_serializer(mode="wrap")
     def _omit_missing_tokens(self, handler):
         data = handler(self)
-        for key in ("promptTokens", "completionTokens", "reasoningTokens"):
+        for key in (
+            "promptTokens", "completionTokens", "reasoningTokens",
+            "firstTokenMs", "totalMs", "stalled", "retried", "retrySucceeded",
+            "streamAttempts", "stallCount", "retryCount", "retrySuccessCount",
+        ):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
