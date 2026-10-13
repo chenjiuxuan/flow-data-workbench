@@ -34,6 +34,7 @@ from .schema import GEN_DRAFT_JSON_SCHEMA, AiDraftResponseModel, GenDraft, Input
 router = APIRouter(prefix="/api/process/ai")
 logger = logging.getLogger(__name__)
 BUDGET_SECONDS = 55.0  # XILIU_LLM_TIMEOUT_S 未设置时的总预算
+_DISCONNECT_POLL_SECONDS = 0.5
 _INPUT_KINDS = {"description", "minutes", "sop"}
 
 
@@ -73,7 +74,12 @@ async def create_ai_draft(
         payload["stats"]["latencyMs"] = max(0, int((time.monotonic() - started) * 1000))
         response = AiDraftResponseModel.model_validate(payload)
     except DraftError as exc:
-        if exc.reason:
+        if exc.status == 499:
+            logger.info(
+                "ai draft cancelled by client elapsed_ms=%s",
+                max(0, int((time.monotonic() - started) * 1000)),
+            )
+        elif exc.reason:
             logger.info("ai draft rejected code=%s status=%s reason=%s",
                         exc.code, exc.status, exc.reason[:300])
         else:
@@ -115,9 +121,12 @@ async def generate_draft(*, source_text: str, requested_name: str | None, input_
             raise DraftError(504, "llm_timeout", LLM_TIMEOUT)
         calls += 1
         try:
-            raw = await asyncio.wait_for(
-                llm.complete(messages=messages, schema=GEN_DRAFT_JSON_SCHEMA, timeout=remaining),
-                timeout=remaining,
+            raw = await _await_llm(
+                asyncio.wait_for(
+                    llm.complete(messages=messages, schema=GEN_DRAFT_JSON_SCHEMA, timeout=remaining),
+                    timeout=remaining,
+                ),
+                is_disconnected,
             )
         except (LlmTimeout, TimeoutError):
             raise DraftError(504, "llm_timeout", LLM_TIMEOUT) from None
@@ -244,6 +253,24 @@ def _parse_match_assets(value: str | None) -> bool:
     if token in {"false", "0", "no"}:
         return False
     raise DraftError(422, "invalid_input", INVALID_MATCH)
+
+
+async def _await_llm(awaitable, is_disconnected: Callable[[], Awaitable[bool]] | None):
+    """跑模型调用，同时轮询断开。取消任务会关掉 httpx 请求，并且不会进入修复轮。"""
+    task = asyncio.create_task(awaitable, name="ai-draft-llm")
+    try:
+        while not task.done():
+            if is_disconnected is not None and await is_disconnected():
+                raise DraftError(499, "llm_failed", "客户端已断开，已取消生成")
+            await asyncio.wait({task}, timeout=_DISCONNECT_POLL_SECONDS)
+        return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 async def _disconnected(request: Request) -> bool:

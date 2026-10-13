@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+import logging
 import time
 
 import pytest
@@ -300,6 +301,49 @@ def test_usage_tokens_are_optional_stats(process_env, monkeypatch):
     assert stats["completionTokens"] == 22
     assert stats["reasoningTokens"] == 7
     assert stats["model"] == "demo-model"
+
+
+def test_disconnect_cancels_inflight_llm_and_skips_repair(process_env, monkeypatch, caplog):
+    client = process_env
+    before = _snapshot(client)
+    started = asyncio.Event()
+    state = {"calls": 0, "cancelled": False, "task": None}
+
+    class Slow:
+        model = "slow"
+
+        async def complete(self, *, messages, schema, timeout):
+            del messages, schema, timeout
+            state["calls"] += 1
+            state["task"] = asyncio.current_task()
+            started.set()
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+            return {"not": "a draft"}
+
+    async def is_disconnected(self):
+        del self
+        return started.is_set()
+
+    monkeypatch.setattr("starlette.requests.Request.is_disconnected", is_disconnected)
+    monkeypatch.setattr("app.process_ai.api.build_client", lambda: Slow())
+    caplog.set_level(logging.INFO, logger="app.process_ai.api")
+    began = time.monotonic()
+    response = _post(client, text=SOURCE)
+    assert time.monotonic() - began < 2
+    assert response.status_code == 499
+    assert response.json()["detail"]["code"] == "llm_failed"
+    assert state["calls"] == 1
+    assert state["cancelled"] is True
+    assert state["task"] is not None and state["task"].done()
+    assert _snapshot(client) == before
+    assert any(
+        record.message.startswith("ai draft cancelled by client") and "elapsed_ms=" in record.message
+        for record in caplog.records
+    )
 
 
 def test_missing_llm_config_is_503_and_does_not_call_http(process_env, monkeypatch):
