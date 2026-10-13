@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Awaitable, Callable
 
@@ -32,7 +33,7 @@ from .schema import GEN_DRAFT_JSON_SCHEMA, AiDraftResponseModel, GenDraft, Input
 
 router = APIRouter(prefix="/api/process/ai")
 logger = logging.getLogger(__name__)
-BUDGET_SECONDS = 55.0
+BUDGET_SECONDS = 55.0  # XILIU_LLM_TIMEOUT_S 未设置时的总预算
 _INPUT_KINDS = {"description", "minutes", "sop"}
 
 
@@ -66,7 +67,7 @@ async def create_ai_draft(
             assets=assets,
             ref_map=ref_map,
             catalog=rows,
-            budget_seconds=BUDGET_SECONDS,
+            budget_seconds=budget_seconds(),
             is_disconnected=lambda: _disconnected(request),
         )
         payload["stats"]["latencyMs"] = max(0, int((time.monotonic() - started) * 1000))
@@ -166,14 +167,42 @@ async def generate_draft(*, source_text: str, requested_name: str | None, input_
             "assetSuggestions": compiled.asset_suggestions,
             "unmatchedAssets": compiled.unmatched_assets,
             "sourceText": source_text,
-            "stats": {
-                "model": llm.model,
-                "latencyMs": 0,
-                "llmCalls": calls,
-                "repaired": repaired,
-            },
+            "stats": _stats(llm, calls=calls, repaired=repaired),
         }
     raise DraftError(502, "llm_failed", "模型返回无法修复")
+
+
+def budget_seconds() -> float:
+    raw = os.environ.get("XILIU_LLM_TIMEOUT_S", "").strip()
+    if not raw:
+        return BUDGET_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("ai draft invalid XILIU_LLM_TIMEOUT_S=%s", raw)
+        return BUDGET_SECONDS
+    if value <= 0:
+        logger.warning("ai draft invalid XILIU_LLM_TIMEOUT_S=%s", raw)
+        return BUDGET_SECONDS
+    return value
+
+
+def _stats(llm, *, calls: int, repaired: bool) -> dict:
+    stats = {
+        "model": llm.model,
+        "latencyMs": 0,
+        "llmCalls": calls,
+        "repaired": repaired,
+    }
+    for key, attr in (
+        ("promptTokens", "prompt_tokens"),
+        ("completionTokens", "completion_tokens"),
+        ("reasoningTokens", "reasoning_tokens"),
+    ):
+        value = getattr(llm, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            stats[key] = value
+    return stats
 
 
 async def _read_request(*, text: str | None, file: UploadFile | None, name: str | None,

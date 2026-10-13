@@ -24,7 +24,10 @@ SOURCE = "张三提交申请后，判断是否通过。通过则由李四执行�
 
 @pytest.fixture(autouse=True)
 def clear_llm_env(monkeypatch):
-    for key in ("XILIU_LLM_BASE_URL", "XILIU_LLM_API_KEY", "XILIU_LLM_MODEL", "XILIU_LLM_FIXTURE"):
+    for key in (
+        "XILIU_LLM_BASE_URL", "XILIU_LLM_API_KEY", "XILIU_LLM_MODEL", "XILIU_LLM_FIXTURE",
+        "XILIU_LLM_MAX_TOKENS", "XILIU_LLM_REASONING_EFFORT", "XILIU_LLM_TIMEOUT_S",
+    ):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -140,6 +143,9 @@ def test_draft_validates_and_does_not_write(process_env, monkeypatch):
     assert body["stats"]["llmCalls"] == 1
     assert body["stats"]["repaired"] is False
     assert isinstance(body["stats"]["latencyMs"], int)
+    assert "promptTokens" not in body["stats"]
+    assert "completionTokens" not in body["stats"]
+    assert "reasoningTokens" not in body["stats"]
     assert len([node for node in draft.nodes if node.type == "start"]) == 1
     assert any(node.type == "end" for node in draft.nodes)
     assert _reachable([node.model_dump() for node in draft.nodes], [edge.model_dump() for edge in draft.edges]) == {
@@ -245,6 +251,55 @@ def test_timeout_is_504_without_waiting_for_the_full_budget(process_env, monkeyp
     assert response.status_code == 504
     assert response.json()["detail"]["code"] == "llm_timeout"
     assert time.monotonic() - started < 2
+
+
+def test_timeout_env_overrides_the_default_budget(process_env, monkeypatch):
+    client = process_env
+
+    class Slow:
+        model = "slow"
+
+        async def complete(self, *, messages, schema, timeout):
+            del messages, schema, timeout
+            await asyncio.sleep(5)
+
+    monkeypatch.setenv("XILIU_LLM_TIMEOUT_S", "0.2")
+    monkeypatch.setattr("app.process_ai.api.build_client", lambda: Slow())
+    started = time.monotonic()
+    response = _post(client, text=SOURCE)
+    assert response.status_code == 504
+    assert response.json()["detail"]["code"] == "llm_timeout"
+    assert time.monotonic() - started < 2
+
+
+def test_usage_tokens_are_optional_stats(process_env, monkeypatch):
+    import httpx
+
+    from app.process_ai.llm import OpenAICompatibleClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": json.dumps(_approval_payload())}}],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 22,
+                "completion_tokens_details": {"reasoning_tokens": 7},
+            },
+        })
+
+    llm = OpenAICompatibleClient(
+        base_url="https://llm.example/v1", api_key="secret-key", model="demo-model",
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr("app.process_ai.api.build_client", lambda: llm)
+    response = _post(process_env, text=SOURCE)
+    assert response.status_code == 200, response.text
+    stats = response.json()["stats"]
+    assert stats["promptTokens"] == 11
+    assert stats["completionTokens"] == 22
+    assert stats["reasoningTokens"] == 7
+    assert stats["model"] == "demo-model"
 
 
 def test_missing_llm_config_is_503_and_does_not_call_http(process_env, monkeypatch):

@@ -1,7 +1,7 @@
 """中间稿与对外响应。落库 schema 不在这里扩展。"""
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from ..process_schemas import ProcessCreate
 
@@ -113,6 +113,17 @@ class DraftStatsOut(GenModel):
     latencyMs: int = Field(ge=0)
     llmCalls: Literal[1, 2]
     repaired: bool
+    promptTokens: int | None = None
+    completionTokens: int | None = None
+    reasoningTokens: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_tokens(self, handler):
+        data = handler(self)
+        for key in ("promptTokens", "completionTokens", "reasoningTokens"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class AiDraftResponseModel(GenModel):
