@@ -36,6 +36,7 @@
 .workspace-directory-import { margin: 24px 8px 0; padding-top: 20px; border-top: 1px solid #e7ebf0; }
 .workspace-directory-import p { margin: 12px 0 0; color: #64748b; font-size: 11px; line-height: 1.8; }
 .workspace-template-options { display: flex; gap: 16px; flex-wrap: wrap; }
+.workspace-template-hint { margin: 8px 0 0; color: #64748b; font-size: 12px; line-height: 1.7; }
 .asset-process-links { margin: 8px 0 24px; padding-top: 16px; border-top: 1px solid #e7ebf0; }
 .asset-process-links h3 { margin: 0 0 12px; color: #475569; font-size: 13px; font-weight: 600; }
 .asset-process-links p { color: #64748b; font-size: 12px; }

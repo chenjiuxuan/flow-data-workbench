@@ -3,7 +3,7 @@ import { CloseOutlined, DeleteOutlined, LinkOutlined, ReloadOutlined } from '@an
 import { useEffect, useState } from 'react'
 import { NODE_TYPE_META } from '../../components/meta'
 import { PROCESS_NODE_META } from '../meta'
-import { useProcessStore } from '../store'
+import { isUnsavedProcess, useProcessStore } from '../store'
 import { nodeForm, normalizeNodeForm, reconcileDrafts, type NodeForm, type PropertyDraft } from '../formState'
 
 interface Props {
@@ -20,6 +20,7 @@ export function ProcessProperties({ assetLoading, assetError, onRetryAssets, onO
   const selection = useProcessStore((state) => state.selection)
   const assets = useProcessStore((state) => state.assets)
   const busy = useProcessStore((state) => state.busy || state.loading)
+  const unsaved = isUnsavedProcess(current)
   // 切换选中项时保留当前文档中的未保存草稿；已保存值变化（包括撤销）后以服务端值为准。
   const [nodeDrafts, setNodeDrafts] = useState<Record<string, PropertyDraft<NodeForm>>>({})
   const [edgeDrafts, setEdgeDrafts] = useState<Record<string, PropertyDraft<string>>>({})
@@ -48,7 +49,7 @@ export function ProcessProperties({ assetLoading, assetError, onRetryAssets, onO
       const saved = JSON.stringify(desired) === baseline || await onSave(() => useProcessStore.getState().edit((content) => {
         const target = content.nodes.find((item) => item.id === node.id)
         if (target) Object.assign(target, desired)
-      }), '属性已保存')
+      }), unsaved ? '属性已记入初稿' : '属性已保存')
       if (saved) setNodeDrafts((previous) => {
         const next = { ...previous }
         delete next[node.id]
@@ -60,7 +61,7 @@ export function ProcessProperties({ assetLoading, assetError, onRetryAssets, onO
       const saved = await onSave(() => useProcessStore.getState().edit((content) => {
         const target = content.edges.find((item) => item.id === edge.id)
         if (target) target.label = edgeLabel
-      }), '连线条件已保存')
+      }), unsaved ? '连线条件已记入初稿' : '连线条件已保存')
       if (saved) setEdgeDrafts((previous) => {
         const next = { ...previous }
         delete next[edge.id]
@@ -163,10 +164,10 @@ export function ProcessProperties({ assetLoading, assetError, onRetryAssets, onO
         ) : null}
       </form>
       <div className="process-properties__footer">
-        <div className="process-properties__state">{dirty ? <Tag color="processing">有未保存修改</Tag> : <span>已保存到当前流程</span>}</div>
+        <div className="process-properties__state">{dirty ? <Tag color="processing">有未保存修改</Tag> : <span>{unsaved ? '已记入初稿' : '已保存到当前流程'}</span>}</div>
         <div className="process-properties__actions">
           <Button danger icon={<DeleteOutlined />} disabled={busy} onClick={() => void onDelete(node ? [node.id] : [], edge ? [edge.id] : [])}>{node ? '删除节点' : '删除连线'}</Button>
-          <Button type="primary" htmlType="submit" form="process-properties-form" disabled={busy || !dirty || !!draft && !draft.name.trim()} loading={busy}>保存修改</Button>
+          <Button type="primary" htmlType="submit" form="process-properties-form" disabled={busy || !dirty || !!draft && !draft.name.trim()} loading={busy}>{unsaved ? '记入初稿' : '保存修改'}</Button>
         </div>
       </div>
     </aside>

@@ -20,6 +20,10 @@ export interface ProcessStore {
   open: (id: string) => Promise<void>
   close: () => void
   create: (data: ProcessCreate) => Promise<ProcessDiagram>
+  /** 打开尚无文档 ID 的内存初稿。编辑、撤销和重做都不会发保存请求。 */
+  openUnsaved: (data: ProcessCreate) => boolean
+  updateUnsavedMeta: (name: string, description: string) => void
+  overwrite: (id: string, data: ProcessCreate, expectedRevision: string) => Promise<ProcessDiagram>
   rename: (id: string, name: string, description: string, expectedRevision?: string) => Promise<void>
   remove: (id: string, expectedRevision?: string) => Promise<void>
   loadAssets: () => Promise<void>
@@ -30,6 +34,10 @@ export interface ProcessStore {
 }
 
 const content = (diagram: ProcessContent): ProcessContent => structuredClone({ nodes: diagram.nodes, edges: diagram.edges })
+/** 内存初稿用空 ID，和已保存文档区分；空字符串在旧逻辑里会被当成“没有打开文档”。 */
+export function isUnsavedProcess<T extends { id: string }>(diagram: T | null | undefined): diagram is T & { id: '' } {
+  return !!diagram && diagram.id === ''
+}
 const summary = ({ nodes: _nodes, edges: _edges, ...data }: ProcessDiagram): ProcessSummary => data
 const sameContent = (a: ProcessContent, b: ProcessContent) => JSON.stringify(a) === JSON.stringify(b)
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
@@ -94,9 +102,53 @@ export function createProcessStore() {
     const saveContent = (diagram: ProcessDiagram, desired: ProcessContent) => processApi.update(diagram.id, {
       name: diagram.name, description: diagram.description, ...desired, expected_revision: diagram.revision,
     })
+    const editLocal = (mutator: (draft: ProcessContent) => void) => {
+      const state = get()
+      const current = state.current
+      if (!isUnsavedProcess(current)) return false
+      const before = content(current)
+      const desired = content(before)
+      mutator(desired)
+      if (sameContent(before, desired)) return false
+      const next: ProcessDiagram = {
+        ...current,
+        nodes: desired.nodes,
+        edges: desired.edges,
+        nodeCount: desired.nodes.length,
+        edgeCount: desired.edges.length,
+      }
+      set({ current: next, past: [...state.past, before].slice(-100), future: [], selection: keepSelection(next) })
+      return true
+    }
+    const travelLocal = (direction: 'undo' | 'redo') => {
+      const state = get()
+      const current = state.current
+      if (!isUnsavedProcess(current)) return false
+      const snapshots = direction === 'undo' ? state.past : state.future
+      const desired = snapshots.at(-1)
+      if (!desired) return false
+      const before = content(current)
+      const next: ProcessDiagram = {
+        ...current,
+        nodes: desired.nodes,
+        edges: desired.edges,
+        nodeCount: desired.nodes.length,
+        edgeCount: desired.edges.length,
+      }
+      set({
+        current: next,
+        past: direction === 'undo' ? state.past.slice(0, -1) : [...state.past, before].slice(-100),
+        future: direction === 'undo' ? [...state.future, before].slice(-100) : state.future.slice(0, -1),
+        selection: keepSelection(next),
+      })
+      return true
+    }
     const travel = (direction: 'undo' | 'redo') => {
-      const id = get().current?.id
-      if (!id || get().loading) return Promise.resolve(false)
+      const current = get().current
+      if (!current) return Promise.resolve(false)
+      if (isUnsavedProcess(current)) return Promise.resolve(travelLocal(direction))
+      if (get().loading) return Promise.resolve(false)
+      const id = current.id
       return enqueue(async () => {
         const state = get()
         if (state.current?.id !== id) return false
@@ -165,6 +217,40 @@ export function createProcessStore() {
         publish(diagram, [], [])
         return diagram
       }, true),
+      openUnsaved: (data) => {
+        if (get().busy) return false
+        cancelOpen()
+        histories.delete('')
+        const diagram: ProcessDiagram = {
+          id: '',
+          name: data.name,
+          description: data.description,
+          revision: '',
+          nodeCount: data.nodes.length,
+          edgeCount: data.edges.length,
+          updatedAt: '',
+          nodes: structuredClone(data.nodes),
+          edges: structuredClone(data.edges),
+        }
+        set({ current: diagram, selection: null, past: [], future: [], error: null, fitVersion: get().fitVersion + 1 })
+        return true
+      },
+      updateUnsavedMeta: (name, description) => {
+        const current = get().current
+        if (!isUnsavedProcess(current)) return
+        set({ current: { ...current, name, description } })
+      },
+      overwrite: (id, data, expectedRevision) => {
+        if (!id) return Promise.reject(new Error('请选择要覆盖的流程'))
+        const payload = { ...content(data), name: data.name, description: data.description }
+        return enqueue(async () => {
+          const saved = await processApi.update(id, { ...payload, expected_revision: expectedRevision })
+          invalidateList()
+          set({ selection: null, fitVersion: get().fitVersion + 1 })
+          publish(saved, [], [])
+          return saved
+        }, true, id)
+      },
       rename: (id, name, description, expectedRevision) => enqueue(async () => {
         const state = get()
         const diagram = state.current?.id === id ? state.current : await processApi.get(id)
@@ -211,8 +297,11 @@ export function createProcessStore() {
         }
       },
       edit: (mutator) => {
-        const id = get().current?.id
-        if (!id || get().loading) return Promise.resolve(false)
+        const current = get().current
+        if (!current) return Promise.resolve(false)
+        if (isUnsavedProcess(current)) return Promise.resolve(editLocal(mutator))
+        if (get().loading) return Promise.resolve(false)
+        const id = current.id
         return enqueue(async () => {
           const state = get()
           if (state.current?.id !== id) return false
