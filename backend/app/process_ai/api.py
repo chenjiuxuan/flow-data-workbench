@@ -13,15 +13,17 @@ from ..db import get_session
 from .assets import catalog_rows, load_available_assets, prefilter_assets
 from .compile import NotAProcess, compile_gen_draft
 from .errors import (
-    BAD_INPUT_KIND,
-    BAD_MATCH_ASSETS,
-    BOTH_INPUTS,
     EMPTY_TEXT,
+    INVALID_BOTH,
+    INVALID_KIND,
+    INVALID_MATCH,
+    INVALID_NEITHER,
     LLM_FAILED,
+    LLM_NOT_CONFIGURED,
     LLM_TIMEOUT,
+    NOT_A_PROCESS,
     UNSUPPORTED_TYPE,
     DraftError,
-    not_process_message,
 )
 from .extract import ALLOWED_EXTENSIONS, extension_of, extract_bytes, prepare_text, read_limited
 from .llm import InvalidModelOutput, LlmFailed, LlmNotConfigured, LlmTimeout, build_client
@@ -70,8 +72,12 @@ async def create_ai_draft(
         payload["stats"]["latencyMs"] = max(0, int((time.monotonic() - started) * 1000))
         response = AiDraftResponseModel.model_validate(payload)
     except DraftError as exc:
-        logger.info("ai draft rejected code=%s status=%s", exc.code, exc.status)
-        raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message}) from exc
+        if exc.reason:
+            logger.info("ai draft rejected code=%s status=%s reason=%s",
+                        exc.code, exc.status, exc.reason[:300])
+        else:
+            logger.info("ai draft rejected code=%s status=%s", exc.code, exc.status)
+        raise HTTPException(status_code=exc.status, detail=_error_detail(exc)) from exc
     logger.info(
         "ai draft ok nodes=%s edges=%s llm_calls=%s repaired=%s latency_ms=%s",
         len(response.draft.nodes), len(response.draft.edges),
@@ -88,7 +94,7 @@ async def generate_draft(*, source_text: str, requested_name: str | None, input_
     try:
         llm = client or build_client()
     except LlmNotConfigured as exc:
-        raise DraftError(502, "llm_failed", str(exc)) from exc
+        raise DraftError(503, "llm_not_configured", LLM_NOT_CONFIGURED) from exc
     messages = build_messages(
         source_text=source_text,
         requested_name=requested_name,
@@ -115,7 +121,7 @@ async def generate_draft(*, source_text: str, requested_name: str | None, input_
         except (LlmTimeout, TimeoutError):
             raise DraftError(504, "llm_timeout", LLM_TIMEOUT) from None
         except LlmNotConfigured as exc:
-            raise DraftError(502, "llm_failed", str(exc)) from exc
+            raise DraftError(503, "llm_not_configured", LLM_NOT_CONFIGURED) from exc
         except LlmFailed as exc:
             raise DraftError(502, "llm_failed", LLM_FAILED) from exc
         except InvalidModelOutput as exc:
@@ -144,7 +150,8 @@ async def generate_draft(*, source_text: str, requested_name: str | None, input_
                 match_assets=match_assets,
             )
         except NotAProcess as exc:
-            raise DraftError(422, "not_a_process", not_process_message(exc.reason)) from exc
+            reason = " ".join((exc.reason or "").split())
+            raise DraftError(422, "not_a_process", NOT_A_PROCESS, reason=reason or None) from exc
         except ValidationError as exc:
             if attempt == 2:
                 raise DraftError(502, "llm_failed", "模型返回无法修复") from exc
@@ -175,12 +182,14 @@ async def _read_request(*, text: str | None, file: UploadFile | None, name: str 
     has_file = file is not None and bool((file.filename or "").strip())
     try:
         if has_text and has_file:
-            raise DraftError(422, "empty_text", BOTH_INPUTS)
+            raise DraftError(422, "invalid_input", INVALID_BOTH)
         if not has_text and not has_file:
-            raise DraftError(422, "empty_text", EMPTY_TEXT)
+            if text is not None and not text.strip():
+                raise DraftError(422, "empty_text", EMPTY_TEXT)
+            raise DraftError(422, "invalid_input", INVALID_NEITHER)
         kind = (input_kind or "description").strip().lower()
         if kind not in _INPUT_KINDS:
-            raise DraftError(422, "empty_text", BAD_INPUT_KIND)
+            raise DraftError(422, "invalid_input", INVALID_KIND)
         match = _parse_match_assets(match_assets)
         requested = " ".join(name.split()).strip() if name and name.strip() else None
         if has_file:
@@ -205,7 +214,7 @@ def _parse_match_assets(value: str | None) -> bool:
         return True
     if token in {"false", "0", "no"}:
         return False
-    raise DraftError(422, "empty_text", BAD_MATCH_ASSETS)
+    raise DraftError(422, "invalid_input", INVALID_MATCH)
 
 
 async def _disconnected(request: Request) -> bool:
@@ -222,6 +231,13 @@ async def _close_upload(file: UploadFile | None) -> None:
         await file.close()
     except Exception:
         return
+
+
+def _error_detail(exc: DraftError) -> dict:
+    detail = {"code": exc.code, "message": exc.message}
+    if exc.reason:
+        detail["reason"] = exc.reason
+    return detail
 
 
 def _dump(payload: dict) -> str:

@@ -196,7 +196,10 @@ def test_not_a_process_writes_nothing(process_env, monkeypatch):
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert detail["code"] == "not_a_process"
-    assert detail["message"].startswith(NOT_A_PROCESS)
+    assert detail["message"] == NOT_A_PROCESS
+    assert detail["message"] == "没有识别到流程。请描述谁在什么环节做什么、有哪些判断，或者直接贴会议纪要或 SOP 原文"
+    assert "这是一段产品介绍" not in detail["message"]
+    assert detail["reason"] == "这是一段产品介绍"
     assert PARSE_FAILED not in detail["message"]
     assert "扫描" not in detail["message"]
     assert _snapshot(client) == before
@@ -244,7 +247,7 @@ def test_timeout_is_504_without_waiting_for_the_full_budget(process_env, monkeyp
     assert time.monotonic() - started < 2
 
 
-def test_missing_llm_config_is_502_and_does_not_call_http(process_env, monkeypatch):
+def test_missing_llm_config_is_503_and_does_not_call_http(process_env, monkeypatch):
     client = process_env
 
     class Boom:
@@ -253,9 +256,9 @@ def test_missing_llm_config_is_502_and_does_not_call_http(process_env, monkeypat
 
     monkeypatch.setattr("app.process_ai.llm.httpx.AsyncClient", Boom)
     response = _post(client, text=SOURCE)
-    assert response.status_code == 502
+    assert response.status_code == 503
     detail = response.json()["detail"]
-    assert detail["code"] == "llm_failed"
+    assert detail["code"] == "llm_not_configured"
     assert "未配置语言模型" in detail["message"]
     assert "key" not in detail["message"].lower()
 
@@ -285,6 +288,7 @@ def test_file_errors_and_docx_pdf_round_trip(process_env, monkeypatch):
     assert scanned.status_code == 422
     assert scanned.json()["detail"]["code"] == "scanned_pdf"
     assert scanned.json()["detail"]["message"] == SCANNED_PDF
+    assert scanned.json()["detail"]["message"] == "这个 PDF 像是扫描件，读不到文字。请把里面的文字复制进来，或上传 Word/文本版"
 
     corrupt = _post(client, file=("bad.pdf", b"not a pdf", "application/pdf"))
     assert corrupt.status_code == 422
@@ -337,13 +341,19 @@ def test_file_errors_and_docx_pdf_round_trip(process_env, monkeypatch):
 def test_input_xor_and_invalid_options(process_env):
     client = process_env
     both = _post(client, text="有文字", file=("a.txt", b"file", "text/plain"))
-    assert both.status_code == 422 and both.json()["detail"]["code"] == "empty_text"
+    assert both.status_code == 422 and both.json()["detail"]["code"] == "invalid_input"
     neither = _post(client, inputKind="description")
-    assert neither.status_code == 422 and neither.json()["detail"]["code"] == "empty_text"
+    assert neither.status_code == 422 and neither.json()["detail"]["code"] == "invalid_input"
+    blank = _post(client, text="   ")
+    assert blank.status_code == 422 and blank.json()["detail"]["code"] == "empty_text"
     bad_kind = _post(client, text="有文字", inputKind="novel")
-    assert bad_kind.status_code == 422
+    assert bad_kind.status_code == 422 and bad_kind.json()["detail"]["code"] == "invalid_input"
     bad_match = _post(client, text="有文字", matchAssets="maybe")
-    assert bad_match.status_code == 422
+    assert bad_match.status_code == 422 and bad_match.json()["detail"]["code"] == "invalid_input"
+    for response in (both, neither, bad_kind, bad_match):
+        message = response.json()["detail"]["message"]
+        assert "inputKind" not in message
+        assert "matchAssets" not in message
 
 
 def _create_diagram(client):

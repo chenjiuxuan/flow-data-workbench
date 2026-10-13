@@ -60,6 +60,7 @@ def test_pdf_text_layer_and_scanned_pdf_are_distinct():
     assert scanned.value.status == 422
     assert scanned.value.code == "scanned_pdf"
     assert scanned.value.message == SCANNED_PDF
+    assert scanned.value.message == "这个 PDF 像是扫描件，读不到文字。请把里面的文字复制进来，或上传 Word/文本版"
     with pytest.raises(DraftError) as broken:
         extract_bytes("broken.pdf", b"not a pdf")
     assert broken.value.code == "parse_failed"

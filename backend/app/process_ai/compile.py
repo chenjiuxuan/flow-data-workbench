@@ -16,7 +16,7 @@ NOTE_PREFIX = "AI 备注："
 QUOTE_PREFIX = "原文依据："
 # 留出补 start/end 和缺失分支的名额，保证节点数不超过 500。
 MAX_MODEL_STEPS = 150
-MIN_TASKS = 2
+MIN_TASKS = 1
 
 _KNOWN_KINDS = {
     "order", "missing_branch", "owner", "conflict",
@@ -109,9 +109,11 @@ def compile_gen_draft(gen: GenDraft, *, source_text: str, requested_name: str | 
     edges = _build_edges(nodes, key_to_id, ids)
     _fill_missing_branches(nodes, edges, ids)
     start_id = _ensure_terminals(nodes, ids)
+    _link_unspecified_to_end(nodes, edges, ids)
     _connect_unreachable(nodes, edges, start_id, ids)
     edges = _sanitize_edges(nodes, edges, ids)
     _fill_missing_branches(nodes, edges, ids)
+    _link_unspecified_to_end(nodes, edges, ids)
     _connect_unreachable(nodes, edges, start_id, ids)
     edges = _sanitize_edges(nodes, edges, ids)
 
@@ -189,6 +191,8 @@ def _build_nodes(steps: list[GenStep], ids: _Ids) -> tuple[list[GNode], dict[str
                 step.reason.strip() or "该步骤需要人工确认",
                 step.sourceQuote.strip(),
             ))
+        if PENDING_PREFIX in node.name:
+            node.notes.append(Note("other", "该步骤已被标为待确认"))
         nodes.append(node)
         key_to_id[key] = node.id
     return nodes, key_to_id
@@ -263,6 +267,27 @@ def _fill_missing_branches(nodes: list[GNode], edges: list[GEdge], ids: _Ids) ->
                 edges.append(GEdge(id=ids.edge(), source=node.id, target=target.id,
                                    label=label, source_handle=handle))
             present[node.id].add(handle)
+
+
+def _link_unspecified_to_end(nodes: list[GNode], edges: list[GEdge], ids: _Ids) -> None:
+    """补上的「未说明的处理」不能断头，必须接到一个结束节点。"""
+    pending = [node for node in nodes if node.step is None and any(
+        note.kind == "missing_branch" for note in node.notes)]
+    if not pending:
+        return
+    ends = [node for node in nodes if node.type == "end"]
+    if not ends:
+        end = GNode(id=ids.node(), type="end", name="结束")
+        end.notes.append(Note("missing_end", "原文未写明结束"))
+        nodes.append(end)
+        ends = [end]
+    end = ends[0]
+    for node in pending:
+        if node.id == end.id:
+            continue
+        if any(edge.source == node.id and edge.target == end.id for edge in edges):
+            continue
+        edges.append(GEdge(id=ids.edge(), source=node.id, target=end.id, source_handle="out"))
 
 
 def _ensure_terminals(nodes: list[GNode], ids: _Ids) -> str:
@@ -496,7 +521,7 @@ def _choose_name(requested: str | None, suggested: str) -> str:
 
 def _clip_name(name: str, *, pending: bool) -> str:
     name = _one_line(name) or "未命名步骤"
-    if pending and not name.startswith(PENDING_PREFIX):
+    if pending and PENDING_PREFIX not in name:
         name = PENDING_PREFIX + name
     if len(name) <= 200:
         return name

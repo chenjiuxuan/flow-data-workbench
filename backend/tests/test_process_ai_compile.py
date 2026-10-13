@@ -111,8 +111,26 @@ def test_missing_decision_branch_is_filled_and_listed():
     assert placeholder.name == f"{PENDING_PREFIX}未说明的处理"
     assert placeholder.type == "task"
     assert any(edge.target == placeholder.id and edge.sourceHandle == "no" for edge in outgoing)
+    ends = [node for node in compiled.draft.nodes if node.type == "end"]
+    assert len(ends) == 1
+    assert any(edge.source == placeholder.id and edge.target == ends[0].id and edge.sourceHandle == "out"
+               for edge in compiled.draft.edges)
     assert any(item["nodeId"] == placeholder.id and item["kind"] == "missing_branch" for item in compiled.uncertainties)
     assert "AI 备注：" in placeholder.description and "原文依据：" in placeholder.description
+
+
+def test_unspecified_branch_adds_an_end_when_none_exists():
+    compiled = _compile([
+        _step("s1", "start", name="开始", next="s2"),
+        _step("s2", "decision", name="是否通过", yes={"to": "s3", "label": "通过"}, no=None),
+        _step("s3", name="办理"),
+    ], source="判断是否通过。通过则办理。")
+    placeholder = next(node for node in compiled.draft.nodes if "未说明的处理" in node.name)
+    ends = [node for node in compiled.draft.nodes if node.type == "end"]
+    assert ends
+    assert any(edge.source == placeholder.id and edge.target in {node.id for node in ends}
+               for edge in compiled.draft.edges)
+    assert _reachable(compiled.draft) == {node.id for node in compiled.draft.nodes}
 
 
 def test_owner_must_be_a_literal_substring():
@@ -267,7 +285,7 @@ def test_match_assets_disabled_leaves_ids_empty_and_skips_suggestions():
     assert task.input == "原始输入"
 
 
-def test_not_a_process_and_too_few_tasks():
+def test_short_flows_are_accepted_and_zero_tasks_are_not():
     with pytest.raises(NotAProcess) as not_process:
         compile_gen_draft(
             GenDraft.model_validate({"isProcess": False, "notProcessReason": "这是产品介绍", "steps": []}),
@@ -277,9 +295,35 @@ def test_not_a_process_and_too_few_tasks():
     with pytest.raises(NotAProcess):
         _compile([
             _step("s1", "start", name="开始", next="s2"),
-            _step("s2", name="只有一步", next="s3"),
-            _step("s3", "end", name="结束"),
+            _step("s2", "end", name="结束"),
         ])
+    one = _compile([
+        _step("s1", "start", name="开始", next="s2"),
+        _step("s2", name="审批", next="s3"),
+        _step("s3", "end", name="结束"),
+    ], source="审批后结束。")
+    assert any(node.name == "审批" for node in one.draft.nodes)
+    short = _compile([
+        _step("s1", "start", name="开始", next="s2"),
+        _step("s2", name="提交", next="s3"),
+        _step("s3", name="审批", next="s4"),
+        _step("s4", "end", name="结束"),
+    ], source="提交后进入审批。")
+    names = {node.name for node in short.draft.nodes}
+    assert "提交" in names and "审批" in names
+
+
+def test_model_pending_prefix_is_listed_once():
+    compiled = _compile([
+        _step("s0", "start", name="开始", next="s1"),
+        _step("s1", name="【待确认】审批", owner="张三", next="s2"),
+        _step("s2", name="归档", next="s3"),
+        _step("s3", "end", name="结束"),
+    ], source="张三提交申请后进入审批，然后归档。")
+    node = next(item for item in compiled.draft.nodes if "审批" in item.name)
+    assert node.name == "【待确认】审批"
+    assert node.name.count(PENDING_PREFIX) == 1
+    assert any(item["nodeId"] == node.id for item in compiled.uncertainties)
 
 
 def test_requested_name_wins_and_extra_fields_are_ignored():
