@@ -33,19 +33,38 @@
 
 ## 启动
 
-需要 Python 3.10+ 和 Node.js 18+。
+建议使用 **Python 3.13、Node.js 24 和 pnpm 10.20.0**，与自动验证环境保持一致。先将项目克隆到本地，在项目根目录分别打开两个终端。
 
-```bash
-# 后端（端口 8000）
+### Windows（PowerShell）
+
+后端（端口 8000）：
+
+```powershell
 cd backend
 python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt      # Windows
-# .venv/bin/pip install -r requirements.txt        # macOS/Linux
-.venv/Scripts/python -m uvicorn app.main:app --port 8000
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-# 前端（端口 5173，另开一个终端）
+### macOS / Linux
+
+后端（端口 8000）：
+
+```bash
+cd backend
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+### 前端（所有平台）
+
+在另一个终端从项目根目录启动前端（端口 5173）：
+
+```bash
 cd frontend
-pnpm install    # 或 npm install
+npm install --global pnpm@10.20.0
+pnpm install --frozen-lockfile
 pnpm dev
 ```
 
@@ -90,15 +109,29 @@ docs/process-guide.md     # 流程图快速上手与备份说明
 
 ## 测试
 
+Windows（PowerShell）：
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pytest tests -q
+
+cd ../frontend
+pnpm test
+pnpm build
+```
+
+macOS / Linux：
+
 ```bash
 cd backend
-.venv/Scripts/python -m pytest tests -q
+.venv/bin/python -m pytest tests -q
 
-# 前端状态 / 撤销 / 竞态回归与生产构建
 cd ../frontend
-npm test
-npm run build
+pnpm test
+pnpm build
 ```
+
+后端测试使用独立的临时 SQLite 数据库，不会修改本地工作台的数据。前端测试覆盖状态、撤销、并发请求、属性表单和布局；构建同时执行 TypeScript 检查。每次推送和提交拉取请求时，GitHub Actions 会运行后端完整测试及前端测试、构建。
 
 ## 已知边界（第一期）
 
@@ -115,3 +148,7 @@ npm run build
 - Excel 单文件最多 10 MiB，ZIP 解压总量最多 64 MiB、2048 个条目、100000 行；无效、超限文件不写入图。
 - 当前编辑采用完整图 CAS 与完整快照撤销，适合小型本地图。数千节点会产生秒级提交耗时；规模测量与第二轮审查处理结果见 [第二轮修复记录](docs/review-round2.md)。
 - 多人协作、定时采集、代码仓库扫描、全局搜索规划在第二期。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE)。

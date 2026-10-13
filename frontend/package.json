@@ -2,6 +2,8 @@
   "name": "dataflow-frontend",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
+  "packageManager": "pnpm@10.20.0",
   "type": "module",
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -6,6 +6,12 @@ backend/.venv/
 
 # 数据库与上传产物
 backend/data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
 
 # 前端
 node_modules/
@@ -14,6 +20,8 @@ frontend/dist/
 
 # 环境与编辑器
 .env
+.env.*
+!.env.example
 .DS_Store
 
 # 已有工作区规则
