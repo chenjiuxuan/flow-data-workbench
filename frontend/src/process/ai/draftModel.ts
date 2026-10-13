@@ -98,6 +98,48 @@ export function previewEdgeLabel(label: string, bridged: boolean) {
   return label
 }
 
+export interface PreviewEdge {
+  id: string
+  source: string
+  target: string
+  label: string
+  sourceHandle?: string | null
+  targetHandle?: string | null
+  /** 只表示预览要改样式。对应的初稿边仍是后端那一条。 */
+  bridged: boolean
+}
+
+/**
+ * 按后端边逐条生成预览视图：不新增、不删除。
+ * 从「开始」连到 unreachable 步骤、且原标签为空时，只在这份视图上显示「衔接不明」。
+ */
+export function previewEdges<T extends {
+  id: string
+  source: string
+  target: string
+  label: string
+  sourceHandle?: string | null
+  targetHandle?: string | null
+}>(
+  nodes: { id: string; type: string }[],
+  edges: readonly T[],
+  unreachable: ReadonlySet<string>,
+): PreviewEdge[] {
+  const starts = new Set(nodes.filter((node) => node.type === 'start').map((node) => node.id))
+  return edges.map((edge) => {
+    const bridged = starts.has(edge.source) && unreachable.has(edge.target)
+    return {
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle,
+      targetHandle: edge.targetHandle,
+      label: previewEdgeLabel(edge.label, bridged),
+      bridged,
+    }
+  })
+}
+
 /** 衔接不明的步骤排在不确定项最前，避免被看成普通备注。 */
 export function orderUncertainties<T extends { kind: string }>(items: readonly T[]) {
   return [...items].sort((left, right) => Number(left.kind !== 'unreachable') - Number(right.kind !== 'unreachable'))

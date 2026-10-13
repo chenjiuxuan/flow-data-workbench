@@ -10,7 +10,7 @@ export const AI_DRAFT_ERROR_MESSAGES: Record<AiDraftErrorCode, string> = {
   text_too_long: '文字超过 20,000 字，请删减后再生成',
   not_a_process: '没有识别到流程。请描述谁在什么环节做什么、有哪些判断，或者直接贴会议纪要或 SOP 原文',
   invalid_input: '请只粘贴文字，或只上传一个文件',
-  llm_not_configured: '未配置语言模型，无法生成流程初稿',
+  llm_not_configured: '未配置语言模型，无法生成流程初稿。请联系管理员配置模型',
   llm_failed: '模型生成失败，请稍后重试',
   llm_timeout: '生成超时，请稍后重试',
 }
@@ -55,14 +55,21 @@ function invalidInputMessage(serverMessage: string) {
   return AI_DRAFT_ERROR_MESSAGES.invalid_input
 }
 
-/** 已知错误码用固定文案。not_a_process 与合法的 invalid_input 保留接口 message。 */
+/** 有后端 message 时原样展示；空 message 才用兜底句。 */
+function llmNotConfiguredMessage(serverMessage: string) {
+  const message = serverMessage.trim()
+  if (message && !mentionsParameterName(message)) return message
+  return AI_DRAFT_ERROR_MESSAGES.llm_not_configured
+}
+
+/** 已知错误码用固定文案。not_a_process、合法的 invalid_input、llm_not_configured 保留接口 message。 */
 export function messageForAiDraftCode(code: string | undefined, serverMessage: string, status: number) {
   if (code === 'not_a_process') return notAProcessMessage(serverMessage)
   if (code === 'invalid_input' || (code === 'empty_text' && looksLikeInvalidInput(serverMessage))) {
     return invalidInputMessage(serverMessage)
   }
-  if ((code === 'llm_failed' || !code) && serverMessage.includes('未配置语言模型')) {
-    return AI_DRAFT_ERROR_MESSAGES.llm_not_configured
+  if (code === 'llm_not_configured' || ((code === 'llm_failed' || !code) && serverMessage.includes('未配置语言模型'))) {
+    return llmNotConfiguredMessage(serverMessage)
   }
   if (code && isAiDraftErrorCode(code)) return AI_DRAFT_ERROR_MESSAGES[code]
   const fallback = STATUS_FALLBACK[status]

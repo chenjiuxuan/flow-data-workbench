@@ -7,6 +7,7 @@ import { AiDraftPanel, type AiDraftActivity } from './process/ai/AiDraftPanel'
 import { OverwriteProcessModal } from './process/ai/OverwriteProcessModal'
 import { countPendingReview } from './process/ai/draftModel'
 import { ProcessEditor } from './process/ProcessEditor'
+import { ProcessApiError } from './process/api'
 import { isUnsavedProcess, useProcessStore } from './process/store'
 import { approvalProcess, emptyProcess } from './process/templates'
 import type { ProcessCreate, ProcessDiagram, ProcessSummary } from './process/types'
@@ -254,7 +255,7 @@ export default function WorkspaceApp() {
       finishSaved(saved, '流程已覆盖')
       return true
     } catch (e) {
-      message.error(`保存失败：${(e as Error).message}`)
+      if (!(e instanceof ProcessApiError && e.status === 409)) message.error(`保存失败：${(e as Error).message}`)
       throw e
     }
   }

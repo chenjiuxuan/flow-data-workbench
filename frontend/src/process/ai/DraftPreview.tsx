@@ -6,7 +6,7 @@ import { useEffect, useMemo } from 'react'
 import { ProcessNode, type ProcessFlowNode } from '../components/ProcessNode'
 import { PROCESS_NODE_META } from '../meta'
 import type { ProcessCreate } from '../types'
-import { previewEdgeLabel, startBridgeTargetIds } from './draftModel'
+import { previewEdges } from './draftModel'
 import '../process.css'
 
 const nodeTypes = { processNode: ProcessNode }
@@ -20,8 +20,8 @@ interface Props {
 
 function DraftCanvas({ draft, unreachableNodeIds, focusNodeId, onFocusNode }: Props) {
   const { fitView } = useReactFlow<ProcessFlowNode, FlowEdge>()
-  const bridged = useMemo(
-    () => startBridgeTargetIds(draft.nodes, draft.edges, unreachableNodeIds),
+  const displayed = useMemo(
+    () => new Map(previewEdges(draft.nodes, draft.edges, unreachableNodeIds).map((edge) => [edge.id, edge])),
     [draft.edges, draft.nodes, unreachableNodeIds],
   )
   const flowNodes = useMemo((): ProcessFlowNode[] => draft.nodes.map((node) => ({
@@ -40,10 +40,11 @@ function DraftCanvas({ draft, unreachableNodeIds, focusNodeId, onFocusNode }: Pr
     ].filter(Boolean).join(' ') || undefined,
   })), [draft.nodes, focusNodeId, unreachableNodeIds])
   const flowEdges = useMemo((): FlowEdge[] => draft.edges.map((edge) => {
-    const bridgedEdge = bridged.has(edge.target) && draft.nodes.some((node) => node.id === edge.source && node.type === 'start')
+    const view = displayed.get(edge.id)
+    const bridgedEdge = view?.bridged ?? false
     return {
       ...edge,
-      label: previewEdgeLabel(edge.label, bridgedEdge),
+      label: view?.label ?? edge.label,
       sourceHandle: edge.sourceHandle ?? (draft.nodes.find((node) => node.id === edge.source)?.type === 'decision' ? 'yes' : 'out'),
       targetHandle: edge.targetHandle ?? 'in',
       type: 'smoothstep',
@@ -57,7 +58,7 @@ function DraftCanvas({ draft, unreachableNodeIds, focusNodeId, onFocusNode }: Pr
       labelBgPadding: [7, 4],
       labelBgBorderRadius: 4,
     }
-  }), [bridged, draft.edges, draft.nodes])
+  }), [displayed, draft.edges, draft.nodes])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

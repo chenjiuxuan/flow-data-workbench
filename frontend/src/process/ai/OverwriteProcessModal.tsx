@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { processApi } from '../api'
 import { downloadProcessJson } from '../downloadJson'
 import type { ProcessDiagram, ProcessSummary } from '../types'
+import { OVERWRITE_STALE_MESSAGE, recoverStaleOverwrite } from './overwriteConflict'
 
 interface Props {
   open: boolean
@@ -24,6 +25,7 @@ export function OverwriteProcessModal({ open, diagrams, onCancel, onApply }: Pro
   const [target, setTarget] = useState<ProcessDiagram | null>(null)
   const [loading, setLoading] = useState(false)
   const [applying, setApplying] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     if (open) return
@@ -31,11 +33,13 @@ export function OverwriteProcessModal({ open, diagrams, onCancel, onApply }: Pro
     setTarget(null)
     setLoading(false)
     setApplying(false)
+    setNotice(null)
   }, [open])
 
   const loadTarget = async () => {
     if (!pickedId) { message.warning('请选择要覆盖的流程'); return }
     setLoading(true)
+    setNotice(null)
     try { setTarget(await processApi.get(pickedId)) }
     catch (error) { message.error(`读取流程失败：${(error as Error).message}`) }
     finally { setLoading(false) }
@@ -44,10 +48,21 @@ export function OverwriteProcessModal({ open, diagrams, onCancel, onApply }: Pro
   const apply = async () => {
     if (!target) return
     setApplying(true)
+    setNotice(null)
     try {
       const saved = await onApply(target)
       if (saved) onCancel()
-    } catch { /* 调用方提示具体错误，弹窗留在确认页以便重试。 */ }
+    } catch (error) {
+      try {
+        const fresh = await recoverStaleOverwrite(error, target.id, (id) => processApi.get(id))
+        if (fresh) {
+          setTarget(fresh)
+          setNotice(OVERWRITE_STALE_MESSAGE)
+        }
+      } catch (readError) {
+        message.error(`读取流程失败：${(readError as Error).message}`)
+      }
+    }
     finally { setApplying(false) }
   }
 
@@ -58,7 +73,7 @@ export function OverwriteProcessModal({ open, diagrams, onCancel, onApply }: Pro
       onCancel={() => !applying && onCancel()}
       destroyOnHidden
       footer={target ? [
-        <Button key="back" disabled={applying} onClick={() => setTarget(null)}>返回选择</Button>,
+        <Button key="back" disabled={applying} onClick={() => { setTarget(null); setNotice(null) }}>返回选择</Button>,
         <Button key="ok" type="primary" danger loading={applying} onClick={() => void apply()}>确认覆盖</Button>,
       ] : [
         <Button key="cancel" onClick={onCancel}>取消</Button>,
@@ -67,6 +82,7 @@ export function OverwriteProcessModal({ open, diagrams, onCancel, onApply }: Pro
     >
       {target ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {notice && <Alert type="warning" showIcon message={notice} />}
           <p style={{ margin: 0 }}>目标流程：{target.name}</p>
           <p style={{ margin: 0 }}>当前节点数：{target.nodeCount} · 连线 {target.edgeCount} 条</p>
           <p style={{ margin: 0 }}>最后修改：{formatUpdatedAt(target.updatedAt)}</p>
