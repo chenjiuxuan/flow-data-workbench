@@ -233,11 +233,16 @@ def test_quote_must_appear_in_source_and_prefix_survives_truncation():
     assert not long_node.name.startswith(PENDING_PREFIX + PENDING_PREFIX)
     quoted = next(item for item in compiled.uncertainties if item["nodeId"] == long_node.id)
     assert quoted["kind"] == "order"
+    assert quoted["reason"] == "步骤顺序不明"
     assert quoted["sourceQuote"] == "先提交"
+    assert "AI 备注：步骤顺序不明" in long_node.description
     assert "原文依据：先提交" in long_node.description
+    assert "该步骤需要人工确认" not in long_node.description
     invented = next(node for node in compiled.draft.nodes if "归档" in node.name)
     invented_note = next(item for item in compiled.uncertainties if item["nodeId"] == invented.id and item["kind"] == "order")
+    assert invented_note["reason"] == "步骤顺序不明"
     assert invented_note["sourceQuote"] == ""
+    assert "AI 备注：步骤顺序不明" in invented.description
 
 
 def test_asset_suggestions_never_enter_the_draft():
@@ -314,16 +319,28 @@ def test_short_flows_are_accepted_and_zero_tasks_are_not():
 
 
 def test_model_pending_prefix_is_listed_once():
+    source = "张三提交申请后进入审批，然后归档。先提交，再由张三审批。"
     compiled = _compile([
         _step("s0", "start", name="开始", next="s1"),
-        _step("s1", name="【待确认】审批", owner="张三", next="s2"),
-        _step("s2", name="归档", next="s3"),
+        _step("s1", name="  【待确认】【待确认】审批", owner="张三", next="s2",
+              uncertain=True, reason="审批人是否必须到场没有写清", sourceQuote="再由张三审批"),
+        _step("s2", name="复核时【待确认】附件", next="s3"),
         _step("s3", "end", name="结束"),
-    ], source="张三提交申请后进入审批，然后归档。")
-    node = next(item for item in compiled.draft.nodes if "审批" in item.name)
+    ], source=source)
+    node = next(item for item in compiled.draft.nodes if item.name.endswith("审批"))
     assert node.name == "【待确认】审批"
     assert node.name.count(PENDING_PREFIX) == 1
-    assert any(item["nodeId"] == node.id for item in compiled.uncertainties)
+    notes = [item for item in compiled.uncertainties if item["nodeId"] == node.id]
+    assert len(notes) == 1
+    assert notes[0]["reason"] == "审批人是否必须到场没有写清"
+    assert notes[0]["sourceQuote"] == "再由张三审批"
+    assert "AI 备注：审批人是否必须到场没有写清" in node.description
+    assert "原文依据：再由张三审批" in node.description
+    assert "该步骤已被标为待确认" not in node.description
+    assert "该步骤需要人工确认" not in node.description
+    middle = next(item for item in compiled.draft.nodes if "附件" in item.name)
+    assert middle.name == "复核时【待确认】附件"
+    assert not any(item["nodeId"] == middle.id for item in compiled.uncertainties)
 
 
 def test_requested_name_wins_and_extra_fields_are_ignored():

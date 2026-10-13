@@ -314,7 +314,8 @@ def test_missing_llm_config_is_503_and_does_not_call_http(process_env, monkeypat
     assert response.status_code == 503
     detail = response.json()["detail"]
     assert detail["code"] == "llm_not_configured"
-    assert "未配置语言模型" in detail["message"]
+    assert detail["message"] == "未配置语言模型，无法生成流程初稿。请联系管理员配置模型"
+    assert detail["message"].endswith("请联系管理员配置模型")
     assert "key" not in detail["message"].lower()
 
 

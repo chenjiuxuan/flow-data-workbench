@@ -174,7 +174,7 @@ def _build_nodes(steps: list[GenStep], ids: _Ids) -> tuple[list[GNode], dict[str
         node = GNode(
             id=ids.node(),
             type=kind,
-            name=_one_line(step.name) or "未命名步骤",
+            name=_collapse_pending_prefix(_one_line(step.name)) or "未命名步骤",
             owner=step.owner.strip(),
             description=step.description.strip(),
             input=step.input.strip(),
@@ -185,14 +185,20 @@ def _build_nodes(steps: list[GenStep], ids: _Ids) -> tuple[list[GNode], dict[str
         if _branch_target(step.yes) and _branch_target(step.no) and kind != "decision":
             node.type = "decision"
             notes.append(Note("other", "该步骤含有两个分支，已按判断节点处理"))
+        reason = step.reason.strip()
+        quote = step.sourceQuote.strip()
         if step.uncertain:
             node.notes.append(Note(
-                _infer_kind(step.reason),
-                step.reason.strip() or "该步骤需要人工确认",
-                step.sourceQuote.strip(),
+                _infer_kind(reason),
+                reason or "该步骤需要人工确认",
+                quote,
             ))
-        if PENDING_PREFIX in node.name:
-            node.notes.append(Note("other", "该步骤已被标为待确认"))
+        elif node.name.startswith(PENDING_PREFIX):
+            node.notes.append(Note(
+                _infer_kind(reason) if reason else "other",
+                reason or "该步骤已被标为待确认",
+                quote,
+            ))
         nodes.append(node)
         key_to_id[key] = node.id
     return nodes, key_to_id
@@ -519,9 +525,22 @@ def _choose_name(requested: str | None, suggested: str) -> str:
     return "未命名流程"
 
 
+def _collapse_pending_prefix(name: str) -> str:
+    """只认开头的【待确认】，连续重复的前缀收成一个。"""
+    cleaned = _one_line(name)
+    rest = cleaned
+    found = False
+    while rest.startswith(PENDING_PREFIX):
+        found = True
+        rest = rest[len(PENDING_PREFIX):].lstrip()
+    if not found:
+        return cleaned
+    return PENDING_PREFIX + rest
+
+
 def _clip_name(name: str, *, pending: bool) -> str:
-    name = _one_line(name) or "未命名步骤"
-    if pending and PENDING_PREFIX not in name:
+    name = _collapse_pending_prefix(name) or "未命名步骤"
+    if pending and not name.startswith(PENDING_PREFIX):
         name = PENDING_PREFIX + name
     if len(name) <= 200:
         return name
