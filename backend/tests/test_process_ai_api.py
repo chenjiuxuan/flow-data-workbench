@@ -18,6 +18,7 @@ from app.process_ai.schema import GenDraft
 from app.process_schemas import ProcessCreate
 from app.process_api import router as process_router
 from app.process_ai.api import router as ai_router
+from app.process_ai.llm import reset_reasoning_block
 from tests.test_process_ai_extract import _blank_pdf, _pdf_with_text
 
 SOURCE = "张三提交申请后，判断是否通过。通过则由李四执行办理，驳回则结束。并核对订单中心。"
@@ -28,8 +29,10 @@ def clear_llm_env(monkeypatch):
     for key in (
         "XILIU_LLM_BASE_URL", "XILIU_LLM_API_KEY", "XILIU_LLM_MODEL", "XILIU_LLM_FIXTURE",
         "XILIU_LLM_MAX_TOKENS", "XILIU_LLM_REASONING_EFFORT", "XILIU_LLM_TIMEOUT_S",
+        "XILIU_LLM_FIRST_TOKEN_TIMEOUT_S", "XILIU_LLM_STALL_TIMEOUT_S",
     ):
         monkeypatch.delenv(key, raising=False)
+    reset_reasoning_block()
 
 
 @pytest.fixture
@@ -344,6 +347,63 @@ def test_disconnect_cancels_inflight_llm_and_skips_repair(process_env, monkeypat
         record.message.startswith("ai draft cancelled by client") and "elapsed_ms=" in record.message
         for record in caplog.records
     )
+
+
+def test_disconnect_during_stream_cancels_request_and_skips_repair(process_env, monkeypatch, caplog):
+    import httpx
+
+    from app.process_ai.llm import OpenAICompatibleClient
+
+    client = process_env
+    before = _snapshot(client)
+
+    class Hang(httpx.AsyncByteStream):
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.closed = False
+
+        async def __aiter__(self):
+            self.started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.closed = True
+                raise
+            if False:
+                yield b""
+
+        async def aclose(self):
+            self.closed = True
+
+    hang = Hang()
+    calls = {"n": 0}
+
+    class Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            del request
+            calls["n"] += 1
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=hang)
+
+    llm = OpenAICompatibleClient(
+        base_url="https://llm.example/v1", api_key="secret-key", model="demo-model",
+        transport=Transport(), reasoning_effort="none", first_token_timeout=30, stall_timeout=30,
+    )
+
+    async def is_disconnected(self):
+        del self
+        return hang.started.is_set()
+
+    monkeypatch.setattr("starlette.requests.Request.is_disconnected", is_disconnected)
+    monkeypatch.setattr("app.process_ai.api.build_client", lambda: llm)
+    caplog.set_level(logging.INFO, logger="app.process_ai.api")
+    began = time.monotonic()
+    response = _post(client, text=SOURCE)
+    assert time.monotonic() - began < 2
+    assert response.status_code == 499
+    assert calls["n"] == 1
+    assert hang.closed is True
+    assert _snapshot(client) == before
+    assert any(record.message.startswith("ai draft cancelled by client") for record in caplog.records)
 
 
 def test_missing_llm_config_is_503_and_does_not_call_http(process_env, monkeypatch):
