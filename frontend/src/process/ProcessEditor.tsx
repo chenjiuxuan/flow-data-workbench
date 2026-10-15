@@ -15,9 +15,11 @@ import { ProcessPalette } from './components/ProcessPalette'
 import { ProcessProperties } from './components/ProcessProperties'
 import { PROCESS_NODE_META, PROCESS_NODE_TYPES } from './meta'
 import { useProcessStore } from './store'
+import { downloadProcessJson } from './downloadJson'
 import { layoutProcess } from './layout'
+import { isUnsavedProcess } from './store'
 import { applyEditableNodeChanges, finalNodePositions } from '../utils/nodePositions'
-import type { ProcessBackup, ProcessNode as NodeRecord, ProcessNodeType } from './types'
+import type { ProcessNode as NodeRecord, ProcessNodeType } from './types'
 import './process.css'
 
 const nodeTypes = { processNode: ProcessNode }
@@ -29,7 +31,10 @@ function inTextOrDialog(target: EventTarget | null) {
   return target instanceof HTMLElement && !!target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="combobox"], [role="textbox"], [role="listbox"]')
 }
 
-export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) => void }) {
+export function ProcessEditor({ onOpenAsset, unsavedActions }: {
+  onOpenAsset: (assetId: string) => void
+  unsavedActions?: { onCreate: () => void; onOverwrite: () => void }
+}) {
   const { message } = AntdApp.useApp()
   const { screenToFlowPosition, fitView } = useReactFlow<ProcessFlowNode, FlowEdge>()
   const current = useProcessStore((state) => state.current)
@@ -157,8 +162,8 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
     })
   }, [save])
 
-  const undo = useCallback(() => save(() => useProcessStore.getState().undo(), '已撤销并保存'), [save])
-  const redo = useCallback(() => save(() => useProcessStore.getState().redo(), '已重做并保存'), [save])
+  const undo = useCallback(() => save(() => useProcessStore.getState().undo(), isUnsavedProcess(useProcessStore.getState().current) ? '已撤销' : '已撤销并保存'), [save])
+  const redo = useCallback(() => save(() => useProcessStore.getState().redo(), isUnsavedProcess(useProcessStore.getState().current) ? '已重做' : '已重做并保存'), [save])
   const deleteItems = useCallback(async (nodeIds: string[], edgeIds: string[]) => {
     const state = useProcessStore.getState()
     if (state.busy || state.loading || !nodeIds.length && !edgeIds.length) return
@@ -292,13 +297,7 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
 
   const exportJson = () => {
     if (!current) return
-    const backup: ProcessBackup = { format: 'process-diagram/v1', name: current.name, description: current.description, nodes: current.nodes, edges: current.edges }
-    const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `${fileName(current.name)}.json`
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    downloadProcessJson(current)
     message.success('已导出当前流程 JSON')
   }
 
@@ -358,6 +357,13 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
               { key: 'json', label: '导出流程 JSON', icon: <FileTextOutlined /> },
             ], onClick: ({ key }) => { if (key === 'json') exportJson(); else void exportPng() } }}
           ><Button icon={<DownloadOutlined />} loading={exporting} disabled={readOnly || exporting}>导出</Button></Dropdown>
+          {isUnsavedProcess(current) && unsavedActions && (
+            <>
+              <span className="process-toolbar__divider" />
+              <Button disabled={readOnly} onClick={unsavedActions.onOverwrite}>覆盖现有流程</Button>
+              <Button type="primary" loading={busy} disabled={readOnly} onClick={unsavedActions.onCreate}>保存为新流程</Button>
+            </>
+          )}
         </div>
       </div>
       <div className="process-editor__workspace">
@@ -411,7 +417,7 @@ export function ProcessEditor({ onOpenAsset }: { onOpenAsset: (assetId: string) 
             </div>
           )}
           {loading && <div className="process-loading"><Spin tip="正在加载流程"><div style={{ width: 160, height: 80 }} /></Spin></div>}
-          <div className="process-canvas__hint">{selection ? '选中节点或连线后，在右侧编辑属性' : '左键框选 · 右键平移 · 滚轮缩放'}</div>
+          <div className="process-canvas__hint">{isUnsavedProcess(current) ? '初稿尚未写入数据库 · ' : ''}{selection ? '选中节点或连线后，在右侧编辑属性' : '左键框选 · 右键平移 · 滚轮缩放'}</div>
         </div>
         <ProcessProperties assetLoading={assetLoading} assetError={assetError} onRetryAssets={() => void refreshAssets()} onOpenAsset={onOpenAsset} onDelete={deleteItems} onSave={save} />
       </div>
