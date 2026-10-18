@@ -15,12 +15,14 @@ from app.process_ai.llm import (
     _chat_url,
     build_client,
     reset_reasoning_block,
+    stream_counters,
 )
 from app.process_ai.schema import GEN_DRAFT_JSON_SCHEMA
 
 _LLM_ENV = (
     "XILIU_LLM_BASE_URL", "XILIU_LLM_API_KEY", "XILIU_LLM_MODEL", "XILIU_LLM_FIXTURE",
     "XILIU_LLM_MAX_TOKENS", "XILIU_LLM_REASONING_EFFORT", "XILIU_LLM_TIMEOUT_S",
+    "XILIU_LLM_FIRST_TOKEN_TIMEOUT_S", "XILIU_LLM_STALL_TIMEOUT_S",
 )
 
 
@@ -67,7 +69,11 @@ def test_strict_schema_falls_back_to_json_mode(monkeypatch):
         def __init__(self, status, payload=None, text=""):
             self.status_code = status
             self._payload = payload or {}
-            self.text = text
+            self.text = text or (json.dumps(self._payload) if self._payload else "")
+            self.headers = {"content-type": "application/json"}
+
+        async def aread(self):
+            return self.text.encode()
 
         def json(self):
             return self._payload
@@ -82,9 +88,13 @@ def test_strict_schema_falls_back_to_json_mode(monkeypatch):
         async def __aexit__(self, *args):
             return False
 
-        async def post(self, url, headers, json):
-            posts.append((url, headers, json))
-            if json["response_format"]["type"] == "json_schema":
+        def stream(self, method, url, headers=None, json=None):
+            del method
+            return _FakeStream(self, url, headers, json)
+
+        async def post(self, url, headers, body):
+            posts.append((url, headers, body))
+            if body["response_format"]["type"] == "json_schema":
                 return FakeResponse(400, text="response_format json_schema is unsupported")
             fenced = "```json\n" + __import__("json").dumps({
                 "isProcess": False, "notProcessReason": "不是流程", "suggestedName": "", "summary": "", "steps": [],
@@ -105,8 +115,23 @@ def test_strict_schema_falls_back_to_json_mode(monkeypatch):
     assert posts[0][2]["response_format"]["json_schema"]["strict"] is True
     assert posts[1][2]["response_format"] == {"type": "json_object"}
     assert "max_tokens" not in posts[0][2]
-    assert "reasoning_effort" not in posts[0][2]
+    assert posts[0][2]["reasoning_effort"] == "none"
+    assert posts[0][2]["stream"] is True
     assert "secret-key" not in repr(client)
+
+
+class _FakeStream:
+    def __init__(self, client, url, headers, body):
+        self.client = client
+        self.url = url
+        self.headers = headers
+        self.body = body
+
+    async def __aenter__(self):
+        return await self.client.post(self.url, self.headers, self.body)
+
+    async def __aexit__(self, *args):
+        return False
 
 
 def _choice(payload=None, usage=None):
@@ -138,7 +163,8 @@ def test_optional_params_are_omitted_when_unset():
     ))
     assert len(seen) == 1
     assert "max_tokens" not in seen[0]
-    assert "reasoning_effort" not in seen[0]
+    assert seen[0]["reasoning_effort"] == "none"
+    assert seen[0]["stream"] is True
     assert seen[0]["temperature"] == 0.2
 
 
@@ -158,6 +184,7 @@ def test_optional_params_are_sent_as_given(monkeypatch):
     monkeypatch.setenv("XILIU_LLM_BASE_URL", "https://llm.example/v1")
     monkeypatch.setenv("XILIU_LLM_API_KEY", "secret-key")
     monkeypatch.setenv("XILIU_LLM_MODEL", "demo-model")
+    assert build_client()._reasoning_effort == "none"
     monkeypatch.setenv("XILIU_LLM_MAX_TOKENS", "1500")
     monkeypatch.setenv("XILIU_LLM_REASONING_EFFORT", "minimal")
     built = build_client()
@@ -248,3 +275,162 @@ def test_reasoning_retry_does_not_start_when_the_budget_is_spent(monkeypatch):
         ))
     assert len(seen) == 1
     assert seen[0]["reasoning_effort"] == "minimal"
+
+
+def _sse(content: str, usage: dict | None = None) -> bytes:
+    payload: dict = {"choices": [{"delta": {"content": content}}]}
+    if usage:
+        payload["usage"] = usage
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _model_text() -> str:
+    return json.dumps({"isProcess": False, "notProcessReason": "不是流程"}, ensure_ascii=False)
+
+
+class _ScriptedStream(httpx.AsyncByteStream):
+    def __init__(self, steps, events, name):
+        self.steps = steps
+        self.events = events
+        self.name = name
+
+    async def __aiter__(self):
+        self.events.append((self.name, "open"))
+        for kind, value in self.steps:
+            if kind == "sleep":
+                await asyncio.sleep(value)
+            else:
+                yield value
+        self.events.append((self.name, "end"))
+
+    async def aclose(self):
+        self.events.append((self.name, "close"))
+
+
+class _ScriptedTransport(httpx.AsyncBaseTransport):
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.requests = []
+        self.events = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.events.append(("http", len(self.requests)))
+        self.requests.append(json.loads(request.content))
+        return self._responses.pop(0)(self)
+
+
+def _event_stream(steps, name):
+    def build(transport: _ScriptedTransport):
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_ScriptedStream(steps, transport.events, name),
+        )
+    return build
+
+
+def _assert_sequential(events):
+    inflight = 0
+    for event in events:
+        if event[0] == "http":
+            assert inflight == 0
+            inflight = 1
+        elif len(event) > 1 and event[1] == "close":
+            inflight -= 1
+            assert inflight == 0
+    assert inflight == 0
+
+
+def test_first_token_timeout_retries_once_and_succeeds(caplog):
+    caplog.set_level(logging.INFO, logger="app.process_ai.llm")
+    transport = _ScriptedTransport([
+        _event_stream([("sleep", 1)], "slow"),
+        _event_stream([("data", _sse(_model_text()))], "ok"),
+    ])
+    client = _client(transport, reasoning_effort="none", first_token_timeout=0.05, stall_timeout=0.05)
+    payload = asyncio.run(client.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert payload["notProcessReason"] == "不是流程"
+    assert len(transport.requests) == 2
+    assert all(body["stream"] is True for body in transport.requests)
+    _assert_sequential(transport.events)
+    assert client.stalled is True
+    assert client.retried is True
+    assert client.retry_succeeded is True
+    assert client.stream_attempts == 2
+    assert client.stall_count == 1
+    assert client.retry_count == 1
+    assert client.retry_success_count == 1
+    assert stream_counters()["stallCount"] == 1
+    assert stream_counters()["streamAttempts"] == 2
+    assert any("stalled=true" in record.message and "first_token_ms" not in record.message for record in caplog.records)
+    assert any(
+        "retried=true" in record.message and "retry_succeeded=true" in record.message and "first_token_ms=" in record.message
+        and "total_ms=" in record.message
+        for record in caplog.records
+    )
+
+
+def test_mid_stream_stall_retries_once():
+    partial = f"data: {json.dumps({'choices': [{'delta': {'content': '{{'}}]})}\n\n".encode()
+    transport = _ScriptedTransport([
+        _event_stream([("data", partial), ("sleep", 1)], "partial"),
+        _event_stream([("data", _sse(_model_text()))], "ok"),
+    ])
+    client = _client(transport, reasoning_effort="none", first_token_timeout=1, stall_timeout=0.05)
+    payload = asyncio.run(client.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert payload["notProcessReason"] == "不是流程"
+    assert len(transport.requests) == 2
+    _assert_sequential(transport.events)
+    assert client.stalled is True and client.retried is True and client.retry_succeeded is True
+    assert client.stall_count == 1
+
+
+def test_retry_stall_becomes_llm_timeout():
+    transport = _ScriptedTransport([
+        _event_stream([("sleep", 1)], "slow-1"),
+        _event_stream([("sleep", 1)], "slow-2"),
+    ])
+    client = _client(transport, reasoning_effort="none", first_token_timeout=0.05, stall_timeout=0.05)
+    with pytest.raises(LlmTimeout):
+        asyncio.run(client.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert len(transport.requests) == 2
+    _assert_sequential(transport.events)
+    assert client.stalled is True
+    assert client.retried is True
+    assert client.retry_succeeded is False
+    assert client.retry_success_count == 0
+    assert client.stall_count == 2
+
+
+def test_non_sse_and_stream_error_fall_back_and_are_cached():
+    def unsupported(_transport):
+        return httpx.Response(400, json={"error": {"message": "stream is not supported"}})
+
+    def ok(_transport):
+        return httpx.Response(200, json=_choice())
+
+    transport = _ScriptedTransport([unsupported, ok, ok])
+    client = _client(transport, reasoning_effort="none")
+    first = asyncio.run(client.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert first["notProcessReason"] == "不是流程"
+    assert transport.requests[0]["stream"] is True
+    assert "stream" not in transport.requests[1]
+
+    again = _client(transport, reasoning_effort="none")
+    asyncio.run(again.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert "stream" not in transport.requests[2]
+
+
+def test_non_sse_json_is_used_without_a_second_call():
+    transport = _ScriptedTransport([
+        lambda _transport: httpx.Response(200, json=_choice()),
+        lambda _transport: httpx.Response(200, json=_choice()),
+    ])
+    client = _client(transport, reasoning_effort="none")
+    payload = asyncio.run(client.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert payload["notProcessReason"] == "不是流程"
+    assert len(transport.requests) == 1
+    assert transport.requests[0]["stream"] is True
+    nxt = _client(transport, reasoning_effort="none")
+    asyncio.run(nxt.complete(messages=[{"role": "user", "content": "hi"}], schema={}, timeout=2))
+    assert "stream" not in transport.requests[1]
